@@ -1,0 +1,4 @@
+*
+!.gitignore
+!myai.cpp
+!.ycm_extra_conf.py
