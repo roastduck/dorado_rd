@@ -4,7 +4,7 @@
 #include <vector>
 #include <exception>
 #include <algorithm>
-#include "Pos.h"
+//#include "Pos.h"
 #include "sdk.h"
 #include "const.h"
 #include "filter.h"
@@ -18,7 +18,7 @@ namespace rdai {
 
 const double ENEMY_GROUP_FACTOR = 1.5;
 
-const double BUY_HERO_THRESHOLD = 0.8;
+const double BUY_HERO_THRESHOLD = 0.4;
 
 const double HP_DANGER_FACTOR = 1.0;
 const double MP_DANGER_FACTOR = 1.0;
@@ -48,8 +48,7 @@ class Character // base class. default action
     // remember to use virtual member
 public:
     int id, typeId;
-    Character(int _id)
-        : id(_id), typeId(console->getUnit(id)->typeId) {}
+    Character(int _id);
 
     virtual int get_group_range() const;
 
@@ -79,7 +78,7 @@ public:
         return id;
     }
 
-    CampGroup *get_belongs() const
+    const CampGroup *get_belongs() const
     {
         return belongs;
     }
@@ -114,26 +113,15 @@ public:
     void add_member(CampUnit *unit);
 
     Group() {}
-    Group(const Group<CampGroup, CampUnit> &other)
-        : member(other.member), idSet(other.idSet)
-    {
-        for (CampUnit *u : member)
-            u->belongs = (CampGroup*) this;
-    }
-
-    Group<CampGroup, CampUnit> &operator=(const Group<CampGroup, CampUnit> &other)
-    {
-        member = other.member, idSet = other.idSet;
-        for (CampUnit *u : member)
-            u->belongs = (CampGroup*) this;
-        return *this;
-    }
+    Group(const Group<CampGroup, CampUnit> &other) = delete;
+    Group<CampGroup, CampUnit> &operator=(const Group<CampGroup, CampUnit> &other) = delete;
 
     Group(Group<CampGroup, CampUnit> &&other)
         : member(std::move(other.member)), idSet(std::move(other.idSet))
     {
         for (CampUnit *u : member)
             u->belongs = (CampGroup*) this;
+        other.member.clear();
     }
 
     Group<CampGroup, CampUnit> &operator=(Group<CampGroup, CampUnit> &&other)
@@ -141,6 +129,7 @@ public:
         member = std::move(other.member), idSet = std::move(other.idSet);
         for (CampUnit *u : member)
             u->belongs = (CampGroup*) this;
+        other.member.clear();
         return *this;
     }
 };
@@ -218,6 +207,7 @@ public:
 private:
     std::map<int, EUnit*> eUnitObj;
     std::map<int, FUnit*> fUnitObj;
+    std::map<int, PUnit*> pUnits;
 
     std::vector<EGroup> eGroups;
     std::vector<FGroup> fGroups;
@@ -253,7 +243,6 @@ public:
 
     EUnit *get_e_unit(int id)
     {
-        if (! console->getUnit(id)) throw std::exception();// sdk have bug?
         if (! eUnitObj.count(id))
             eUnitObj[id] = new EUnit(id);
         return eUnitObj[id];
@@ -261,10 +250,14 @@ public:
 
     FUnit *get_f_unit(int id)
     {
-        if (! console->getUnit(id)) throw std::exception();// sdk have bug?
         if (! fUnitObj.count(id))
             fUnitObj[id] = new FUnit(id);
         return fUnitObj[id];
+    }
+    
+    PUnit *get_p_unit(int id)
+    {
+        return pUnits[id];
     }
 
     const std::vector<EGroup> &get_e_groups() const
@@ -287,7 +280,7 @@ public:
 
 int Character::get_group_range() const
 {
-    return console->getUnit(id)->range * ENEMY_GROUP_FACTOR;
+    return conductor.get_p_unit(id)->range * ENEMY_GROUP_FACTOR;
 }
 
 void Character::attack(const EGroup &target)
@@ -295,7 +288,7 @@ void Character::attack(const EGroup &target)
     int targetId = -1, curdis2;
     for (const EUnit *e : target.get_member())
     {
-        int newdis2 = dis2(console->getUnit(e->get_id())->pos, console->getUnit(id)->pos);
+        int newdis2 = dis2(conductor.get_p_unit(e->get_id())->pos, conductor.get_p_unit(id)->pos);
         if (! ~targetId || newdis2 < curdis2)
             curdis2 = newdis2, targetId = e->get_id();
     }
@@ -304,24 +297,24 @@ void Character::attack(const EGroup &target)
         {
             std::vector<Pos> path;
             findShortestPath
-                (conductor.get_map(), console->getUnit(id)->pos, console->getUnit(e->get_id())->pos, path);
+                (conductor.get_map(), conductor.get_p_unit(id)->pos, conductor.get_p_unit(e->get_id())->pos, path);
             int newdis2 = length(path);
             if (! ~targetId || newdis2 < curdis2)
                 curdis2 = newdis2, targetId = e->get_id();
         }
-    console->attack(console->getUnit(targetId), console->getUnit(id));
+    console->attack(conductor.get_p_unit(targetId), conductor.get_p_unit(id));
 }
 
 void Character::move(const Pos &p)
 {
-    console->move(p, console->getUnit(id));
+    console->move(p, conductor.get_p_unit(id));
 }
 
 void Character::mine(const EGroup &target)
 {
     auto member = target.get_member();
-    if (member.size() == 1 && lowerCase(console->getUnit(member.front()->get_id())->name) == "mine")
-        move(console->getUnit(member.front()->get_id())->pos);
+    if (member.size() == 1 && lowerCase(conductor.get_p_unit(member.front()->get_id())->name) == "mine")
+        move(conductor.get_p_unit(member.front()->get_id())->pos);
     else
         attack(target);
 }
@@ -379,9 +372,9 @@ void EGroup::add_adj_members_recur(EUnit *unit)
     add_member(unit);
     UnitFilter filter;
     filter.setAreaFilter
-        (new Circle(console->getUnit(unit->id)->pos, unit->character.get_group_range()), "a");
+        (new Circle(conductor.get_p_unit(unit->id)->pos, unit->character.get_group_range()), "a");
     // including mine
-    for (PUnit *item : console->enemyUnits(filter))
+    for (const PUnit *item : console->enemyUnits(filter))
         if (! idExist(item->id))
             add_adj_members_recur(conductor.get_e_unit(item->id));
 }
@@ -391,19 +384,31 @@ double EGroup::danger_factor() const
     double cur(0), max(0);
     for (const EUnit *e : member)
     {
-        console->selectUnit(console->getUnit(e->id));
+        console->selectUnit(conductor.get_p_unit(e->id));
 
         // may consider recover rate
-        cur += console->unitArg("hp","c") * HP_DANGER_FACTOR;
-        max += console->unitArg("hp","m") * HP_DANGER_FACTOR;
-        cur += console->unitArg("mp","c") * MP_DANGER_FACTOR;
-        max += console->unitArg("mp","m") * MP_DANGER_FACTOR;
-        cur += console->unitArg("atk","c") * ATK_DANGER_FACTOR;
-        max += console->unitArg("atk","m") * ATK_DANGER_FACTOR;
-        cur += console->unitArg("def","c") * DEF_DANGER_FACTOR;
-        max += console->unitArg("def","m") * DEF_DANGER_FACTOR;
-        cur += console->unitArg("speed","c") * SPEED_DANGER_FACTOR;
-        max += console->unitArg("speed","m") * SPEED_DANGER_FACTOR;
+        if (lowerCase(conductor.get_p_unit(e->id)->name) == "observer")
+        {
+            cur += console->unitArg("hp","c") * HP_DANGER_FACTOR;
+            max += console->unitArg("hp","m") * HP_DANGER_FACTOR;
+            cur += console->unitArg("def","c") * DEF_DANGER_FACTOR;
+            max += console->unitArg("def","m") * DEF_DANGER_FACTOR;
+        } else
+        {
+            cur += console->unitArg("hp","c") * HP_DANGER_FACTOR;
+            max += console->unitArg("hp","m") * HP_DANGER_FACTOR;
+            if (conductor.get_p_unit(e->id)->isHero())
+            {
+                cur += console->unitArg("mp","c") * MP_DANGER_FACTOR;
+                max += console->unitArg("mp","m") * MP_DANGER_FACTOR;
+            }
+            cur += console->unitArg("atk","c") * ATK_DANGER_FACTOR;
+            max += console->unitArg("atk","m") * ATK_DANGER_FACTOR;
+            cur += console->unitArg("def","c") * DEF_DANGER_FACTOR;
+            max += console->unitArg("def","m") * DEF_DANGER_FACTOR;
+            cur += console->unitArg("speed","c") * SPEED_DANGER_FACTOR;
+            max += console->unitArg("speed","m") * SPEED_DANGER_FACTOR;
+        }
         
         console->selectUnit(0);
 
@@ -415,8 +420,8 @@ double EGroup::mine_factor() const
 {
     for (const EUnit *_u : member)
     {
-        const PUnit *p = console->getUnit(_u->id);
-        if (lowerCase(p->name) == "mine" && console->unitArg("energy", "c") > 0)
+        const PUnit *p = conductor.get_p_unit(_u->id);
+        if (lowerCase(p->name) == "mine" && console->unitArg("energy", "c", p) > 0)
             return 1.0;
     }
     return 0.0;
@@ -443,6 +448,9 @@ void FGroup::action()
 /********************************/
 /*     Conductor Implement      */
 /********************************/
+
+inline Character::Character(int _id)
+    : id(_id), typeId(conductor.get_p_unit(id)->typeId) {}
 
 double Conductor::need_buy_hammerguard() const
 {
@@ -472,15 +480,12 @@ double Conductor::need_buy_hero() const
 void Conductor::enemy_make_groups()
 {
     eGroups.clear();
-    for (PUnit *item : console->enemyUnits())
-        try
+    for (const PUnit *item : console->enemyUnits())
+        if (! get_e_unit(item->id)->get_belongs())
         {
-            if (! get_e_unit(item->id)->get_belongs())
-            {
-                eGroups.push_back(EGroup());
-                eGroups.back().add_adj_members_recur(get_e_unit(item->id));
-            }
-        } catch (const std::exception &e) {}
+            eGroups.push_back(EGroup());
+            eGroups.back().add_adj_members_recur(get_e_unit(item->id));
+        }
 }
 
 void Conductor::check_buy_hero()
@@ -518,6 +523,10 @@ void Conductor::check_update_hero()
 void Conductor::init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd)
 {
     map = &_map, info = &_info, cmd = &_cmd;
+    pUnits.clear();
+    for (const auto &u : info->units)
+        pUnits[u.id] = const_cast<PUnit*>(&u);
+    
     enemy_make_groups();
 }
 
