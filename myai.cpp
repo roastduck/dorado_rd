@@ -2,6 +2,7 @@
 #include <map>
 #include <cmath>
 #include <vector>
+#include <fstream>
 #include <exception>
 #include <algorithm>
 #include "sdk.h"
@@ -10,6 +11,21 @@
 #include "console.h"
 
 namespace rdai {
+
+/********************************/
+/*     Logger                   */
+/********************************/
+
+#ifdef RD_LOG_FILE
+    std::ofstream mylog("mylog.txt");
+#else
+    class NullBuffer : public std::streambuf
+    {
+    public:
+        int overflow(int c) { return c; }
+    } bull_buff;
+    std::ostream mylog(&bull_buff);
+#endif // RD_LOG_FILE    
 
 /********************************/
 /*     Math Helper              */
@@ -121,11 +137,15 @@ public:
 template <class CampGroup, class CampUnit>
 class Group
 {
+    static int groupIdCnt;
+
 protected:
     std::vector<CampUnit*> member;
     std::set<int> idSet;
 
 public:
+    int groupId;
+    
     ~Group();
 
     bool idExist(int id) const
@@ -140,12 +160,12 @@ public:
 
     void add_member(CampUnit *unit);
 
-    Group() {}
+    Group() : groupId(++groupIdCnt) {}
     Group(const Group<CampGroup, CampUnit> &other) = delete;
     Group<CampGroup, CampUnit> &operator=(const Group<CampGroup, CampUnit> &other) = delete;
 
     Group(Group<CampGroup, CampUnit> &&other)
-        : member(std::move(other.member)), idSet(std::move(other.idSet))
+        : member(std::move(other.member)), idSet(std::move(other.idSet)), groupId(other.groupId)
     {
         for (CampUnit *u : member)
             u->belongs = (CampGroup*) this;
@@ -154,7 +174,7 @@ public:
 
     Group<CampGroup, CampUnit> &operator=(Group<CampGroup, CampUnit> &&other)
     {
-        member = std::move(other.member), idSet = std::move(other.idSet);
+        member = std::move(other.member), idSet = std::move(other.idSet), groupId = other.groupId;
         for (CampUnit *u : member)
             u->belongs = (CampGroup*) this;
         other.member.clear();
@@ -170,7 +190,11 @@ public:
     }
 
     double strength_factor() const;
+    void logMsg() const;
 };
+
+template <class CampGroup, class CampUnit>
+int Group<CampGroup, CampUnit>::groupIdCnt;
 
 class EUnit : public Unit<EGroup, EUnit> // Enemy Unit
 {
@@ -187,6 +211,8 @@ public:
 class FUnit : public Unit<FGroup, FUnit> // Friend Unit
 {
     friend FGroup;
+    
+    int madeAction; // = round
 
     void attack(const EGroup &target);
     void move(const Pos &p);
@@ -214,14 +240,15 @@ class FGroup : public Group<FGroup, FUnit> // Friend Group
 {
     bool checkAttack();
     bool checkMine();
-    bool checkJoin();
-    bool checkSplit();
     bool checkSearch();
 
 public:
     double ability_factor() const;
 
     void action();
+    
+    bool checkJoin();
+    bool checkSplit();
 };
 
 /********************************/
@@ -399,20 +426,26 @@ EUnit::EUnit(int _id)
     : Unit<EGroup, EUnit>(_id) {}
 
 FUnit::FUnit(int _id)
-    : Unit<FGroup, FUnit>(_id) {}
+    : Unit<FGroup, FUnit>(_id), madeAction(-1) {}
 
 void FUnit::attack(const EGroup &target)
 {
+    if (madeAction == console->round()) return;
+    madeAction = console->round();
     character.attack(target);
 }
 
 void FUnit::move(const Pos &p)
 {
+    if (madeAction == console->round()) return;
+    madeAction = console->round();
     character.move(p);
 }
 
 void FUnit::mine(const EGroup &target)
 {
+    if (madeAction == console->round()) return;
+    madeAction = console->round();
     character.mine(target);
 }
 
@@ -484,6 +517,15 @@ double Group<CampGroup, CampUnit>::strength_factor() const
     return inf_1(ret);
 }
 
+template <class CampGroup, class CampUnit>
+void Group<CampGroup, CampUnit>::logMsg() const
+{
+    mylog << "Action : Group " << groupId << " : { ";
+    for (const CampUnit *u : member)
+        mylog << u->id << ", ";
+    mylog << "}" << std::endl;
+}
+
 double EGroup::danger_factor() const
 {
     return strength_factor() * DANGER_FACTOR;
@@ -525,6 +567,7 @@ bool FGroup::checkMine()
     if (! cur_factor) return false;
     for (FUnit *u : member)
         u->mine(*target);
+    mylog << "Action : Group " << groupId << " : mine Group " << target->groupId << std::endl;
     return true;
 }
 
@@ -534,12 +577,13 @@ bool FGroup::checkJoin()
     double this_ability = ability_factor();
     double cur_factor = 0.0;
     for (FGroup &g : const_cast<std::vector<FGroup>&>(conductor.get_f_groups()))
-    {
-        double new_factor = inf_1(g.ability_factor() * this_ability);
-        new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * JOIN_DIS_FACTOR));
-        if (new_factor < JOIN_THRESHOLD && new_factor > cur_factor)
-            cur_factor = new_factor, target = &g;
-    }
+        if (! g.member.empty())
+        {
+            double new_factor = inf_1(g.ability_factor() * this_ability);
+            new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * JOIN_DIS_FACTOR));
+            if (new_factor < JOIN_THRESHOLD && new_factor > cur_factor)
+                cur_factor = new_factor, target = &g;
+        }
     if (! cur_factor) return false;
     std::vector<FUnit*> _member;
     for (FUnit *u : member)
@@ -548,6 +592,7 @@ bool FGroup::checkJoin()
         else
             _member.push_back(u), u->move(target->center());
     member = std::move(_member);
+    mylog << "Action : Group " << groupId << " : join Group " << target->groupId << std::endl;
     return true;
 }
 
@@ -561,6 +606,7 @@ bool FGroup::checkSplit()
         member.pop_back();
     }
     const_cast<std::vector<FGroup>&>(conductor.get_f_groups()).push_back(std::move(newGroup));
+    mylog << "Action : Group " << groupId << " : split " << std::endl;
     return true;
 }
 
@@ -568,15 +614,15 @@ bool FGroup::checkSearch()
 {
     for (FUnit *u : member)
         u->move(MINE_POS[0]);
+    mylog << "Action : Group " << groupId << " : search " << std::endl;
     return true;
 }
 
 void FGroup::action()
 {
+    logMsg();
     if (checkAttack()) return;
     if (checkMine()) return;
-    if (checkJoin()) return;
-    if (checkSplit()) return;
     if (checkSearch()) return;
 }
 
@@ -673,17 +719,6 @@ void Conductor::work()
     check_callback_hero();
     check_update_hero();
 
-    for (auto i=fGroups.begin(); i!=fGroups.end(); i++)
-        if (i->get_member().empty())
-        {
-            std::vector<FGroup> _fGroups;
-            for (FGroup &g : fGroups)
-                if (! g.get_member().empty())
-                    _fGroups.push_back(std::move(g));
-            fGroups = std::move(_fGroups);
-            break;
-        }
-
     UnitFilter filterAvoidBase;
     filterAvoidBase.setAvoidFilter("militarybase");
     for (const PUnit *u : console->friendlyUnits(filterAvoidBase))
@@ -695,6 +730,20 @@ void Conductor::work()
             fGroups.back().add_member(obj);
         }
     }
+    
+    for (size_t i=0; i<fGroups.size(); i++) // do use id
+        if (! fGroups[i].get_member().empty())
+            if (! fGroups[i].checkJoin()) fGroups[i].checkSplit();
+    for (auto i=fGroups.begin(); i!=fGroups.end(); i++)
+        if (i->get_member().empty())
+        {
+            std::vector<FGroup> _fGroups;
+            for (FGroup &g : fGroups)
+                if (! g.get_member().empty())
+                    _fGroups.push_back(std::move(g));
+            fGroups = std::move(_fGroups);
+            break;
+        }
     
     for (FGroup &g : fGroups)
         g.action();
@@ -709,8 +758,10 @@ void Conductor::work()
 void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 {
     using namespace rdai;
-
+    
     console = new Console(map, info, cmd);
+    
+    mylog << "Round " << console->round() << std::endl;
 
     try
     {
