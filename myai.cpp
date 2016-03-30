@@ -4,13 +4,23 @@
 #include <vector>
 #include <exception>
 #include <algorithm>
-//#include "Pos.h"
 #include "sdk.h"
 #include "const.h"
 #include "filter.h"
 #include "console.h"
 
 namespace rdai {
+
+/********************************/
+/*     Math Helper              */
+/********************************/
+
+const double pi = acos(-1);
+
+inline double inf_1(double x)
+{
+    return atan(x) / pi * 2;
+}
 
 /********************************/
 /*     Global Variables         */
@@ -20,12 +30,24 @@ const double ENEMY_GROUP_FACTOR = 1.5;
 
 const double BUY_HERO_THRESHOLD = 0.4;
 
-const double HP_DANGER_FACTOR = 1.0;
-const double MP_DANGER_FACTOR = 1.0;
-const double ATK_DANGER_FACTOR = 1.0;
-const double DEF_DANGER_FACTOR = 0.7;
-const double SPEED_DANGER_FACTOR = 0.5;
-const double RANGE_DANGER_FACTOR = 0.9;
+const double HP_STRENGTH_FACTOR = 1.0;
+const double MP_STRENGTH_FACTOR = 1.0;
+const double ATK_STRENGTH_FACTOR = 1.0;
+const double DEF_STRENGTH_FACTOR = 0.7;
+const double SPEED_STRENGTH_FACTOR = 0.5;
+const double RANGE_STRENGTH_FACTOR = 0.9;
+
+const double DANGER_FACTOR = 1.0;
+const double ABILITY_FACTOR = 1.0;
+
+const double MINE_THRESHOLD = 0.2;
+const double MINE_DIS_FACTOR = 0.1;
+
+const double JOIN_THRESHOLD = 0.4;
+const double JOIN_DIS_FACTOR = 0.4;
+const int JOIN_DIS2_THRESHOLD = 100;
+
+const double SPLIT_THRESHOLD = 0.9;
 
 static Console *console = 0;
 
@@ -49,6 +71,9 @@ class Character // base class. default action
 public:
     int id, typeId;
     Character(int _id);
+
+    PUnit *get_entity();
+    const PUnit *get_entity() const;
 
     virtual int get_group_range() const;
 
@@ -77,6 +102,9 @@ public:
     {
         return id;
     }
+
+    PUnit *get_entity();
+    const PUnit *get_entity() const;
 
     const CampGroup *get_belongs() const
     {
@@ -132,6 +160,16 @@ public:
         other.member.clear();
         return *this;
     }
+
+    Pos center() const
+    {
+        Pos ret(0, 0);
+        for (const CampUnit *u : member)
+            ret = ret + u->get_entity()->pos;
+        return Pos(ret.x / member.size(), ret.y / member.size());
+    }
+
+    double strength_factor() const;
 };
 
 class EUnit : public Unit<EGroup, EUnit> // Enemy Unit
@@ -174,7 +212,15 @@ public:
 
 class FGroup : public Group<FGroup, FUnit> // Friend Group
 {
+    bool checkAttack();
+    bool checkMine();
+    bool checkJoin();
+    bool checkSplit();
+    bool checkSearch();
+
 public:
+    double ability_factor() const;
+
     void action();
 };
 
@@ -278,9 +324,19 @@ public:
 /*     Character Implement      */
 /********************************/
 
+inline PUnit *Character::get_entity()
+{
+    return conductor.get_p_unit(id);
+}
+
+inline const PUnit *Character::get_entity() const
+{
+    return conductor.get_p_unit(id);
+}
+
 int Character::get_group_range() const
 {
-    return conductor.get_p_unit(id)->range * ENEMY_GROUP_FACTOR;
+    return get_entity()->range * ENEMY_GROUP_FACTOR;
 }
 
 void Character::attack(const EGroup &target)
@@ -288,7 +344,7 @@ void Character::attack(const EGroup &target)
     int targetId = -1, curdis2;
     for (const EUnit *e : target.get_member())
     {
-        int newdis2 = dis2(conductor.get_p_unit(e->get_id())->pos, conductor.get_p_unit(id)->pos);
+        int newdis2 = dis2(e->get_entity()->pos, get_entity()->pos);
         if (! ~targetId || newdis2 < curdis2)
             curdis2 = newdis2, targetId = e->get_id();
     }
@@ -297,24 +353,24 @@ void Character::attack(const EGroup &target)
         {
             std::vector<Pos> path;
             findShortestPath
-                (conductor.get_map(), conductor.get_p_unit(id)->pos, conductor.get_p_unit(e->get_id())->pos, path);
+                (conductor.get_map(), get_entity()->pos, e->get_entity()->pos, path);
             int newdis2 = length(path);
             if (! ~targetId || newdis2 < curdis2)
                 curdis2 = newdis2, targetId = e->get_id();
         }
-    console->attack(conductor.get_p_unit(targetId), conductor.get_p_unit(id));
+    console->attack(conductor.get_p_unit(targetId), get_entity());
 }
 
 void Character::move(const Pos &p)
 {
-    console->move(p, conductor.get_p_unit(id));
+    console->move(p, get_entity());
 }
 
 void Character::mine(const EGroup &target)
 {
     auto member = target.get_member();
-    if (member.size() == 1 && lowerCase(conductor.get_p_unit(member.front()->get_id())->name) == "mine")
-        move(conductor.get_p_unit(member.front()->get_id())->pos);
+    if (member.size() == 1 && lowerCase(member.front()->get_entity()->name) == "mine")
+        move(member.front()->get_entity()->pos);
     else
         attack(target);
 }
@@ -326,6 +382,18 @@ void Character::mine(const EGroup &target)
 template <class CampGroup, class CampUnit>
 Unit<CampGroup, CampUnit>::Unit(int _id)
     : id(_id), character(id), belongs(0) {}
+
+template <class CampGroup, class CampUnit>
+inline PUnit *Unit<CampGroup, CampUnit>::get_entity()
+{
+    return conductor.get_p_unit(id);
+}
+
+template <class CampGroup, class CampUnit>
+inline const PUnit *Unit<CampGroup, CampUnit>::get_entity() const
+{
+    return conductor.get_p_unit(id);
+}
 
 EUnit::EUnit(int _id)
     : Unit<EGroup, EUnit>(_id) {}
@@ -372,77 +440,144 @@ void EGroup::add_adj_members_recur(EUnit *unit)
     add_member(unit);
     UnitFilter filter;
     filter.setAreaFilter
-        (new Circle(conductor.get_p_unit(unit->id)->pos, unit->character.get_group_range()), "a");
+        (new Circle(unit->get_entity()->pos, unit->character.get_group_range()), "a");
     // including mine
     for (const PUnit *item : console->enemyUnits(filter))
         if (! idExist(item->id))
             add_adj_members_recur(conductor.get_e_unit(item->id));
 }
 
-double EGroup::danger_factor() const
+template <class CampGroup, class CampUnit>
+double Group<CampGroup, CampUnit>::strength_factor() const
 {
-    double cur(0), max(0);
-    for (const EUnit *e : member)
+    double ret(0);
+    for (const CampUnit *e : member)
     {
-        console->selectUnit(conductor.get_p_unit(e->id));
+        double val(0), ava(0), tot(0);
+
+        console->selectUnit(e->get_entity());
 
         // may consider recover rate
-        if (lowerCase(conductor.get_p_unit(e->id)->name) == "observer")
+        if (lowerCase(e->get_entity()->name) == "observer")
         {
-            cur += console->unitArg("hp","c") * HP_DANGER_FACTOR;
-            max += console->unitArg("hp","m") * HP_DANGER_FACTOR;
-            cur += console->unitArg("def","c") * DEF_DANGER_FACTOR;
-            max += console->unitArg("def","m") * DEF_DANGER_FACTOR;
+            ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
+            tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
+            val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
         } else
         {
-            cur += console->unitArg("hp","c") * HP_DANGER_FACTOR;
-            max += console->unitArg("hp","m") * HP_DANGER_FACTOR;
-            if (conductor.get_p_unit(e->id)->isHero())
+            ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
+            tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
+            if (e->get_entity()->isHero())
             {
-                cur += console->unitArg("mp","c") * MP_DANGER_FACTOR;
-                max += console->unitArg("mp","m") * MP_DANGER_FACTOR;
+                ava += console->unitArg("mp","c") * MP_STRENGTH_FACTOR;
+                tot += console->unitArg("mp","m") * MP_STRENGTH_FACTOR;
             }
-            cur += console->unitArg("atk","c") * ATK_DANGER_FACTOR;
-            max += console->unitArg("atk","m") * ATK_DANGER_FACTOR;
-            cur += console->unitArg("def","c") * DEF_DANGER_FACTOR;
-            max += console->unitArg("def","m") * DEF_DANGER_FACTOR;
-            cur += console->unitArg("speed","c") * SPEED_DANGER_FACTOR;
-            max += console->unitArg("speed","m") * SPEED_DANGER_FACTOR;
+            val += console->unitArg("atk","c") * ATK_STRENGTH_FACTOR;
+            val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
+            if (! e->get_entity()->isBase() && ! e->get_entity()->isMine())
+                val += console->unitArg("speed","c") * SPEED_STRENGTH_FACTOR;
         }
-        
-        console->selectUnit(0);
+        ret += val * ava / tot;
 
+        console->selectUnit(0);
     }
-    return cur / max;
+    return inf_1(ret);
+}
+
+double EGroup::danger_factor() const
+{
+    return strength_factor() * DANGER_FACTOR;
+}
+
+double FGroup::ability_factor() const
+{
+    return strength_factor() * ABILITY_FACTOR;
 }
 
 double EGroup::mine_factor() const
 {
     for (const EUnit *_u : member)
     {
-        const PUnit *p = conductor.get_p_unit(_u->id);
+        const PUnit *p = _u->get_entity();
         if (lowerCase(p->name) == "mine" && console->unitArg("energy", "c", p) > 0)
             return 1.0;
     }
     return 0.0;
 }
 
-void FGroup::action()
+bool FGroup::checkAttack()
+{
+    // TODO
+    return false;
+}
+
+bool FGroup::checkMine()
 {
     const EGroup *target = 0;
     double cur_factor = 0.0;
     for (const EGroup &g : conductor.get_e_groups())
     {
         double new_factor = g.mine_factor() / g.danger_factor();
-        if (new_factor > cur_factor)
+        new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * MINE_DIS_FACTOR));
+        if (new_factor > MINE_THRESHOLD && new_factor > cur_factor)
             cur_factor = new_factor, target = &g;
     }
-    if (cur_factor)
-        for (FUnit *u : member)
-            u->mine(*target);
-    else
-        for (FUnit *u : member)
-            u->move(MINE_POS[0]);
+    if (! cur_factor) return false;
+    for (FUnit *u : member)
+        u->mine(*target);
+    return true;
+}
+
+bool FGroup::checkJoin()
+{
+    FGroup *target = 0;
+    double this_ability = ability_factor();
+    double cur_factor = 0.0;
+    for (FGroup &g : const_cast<std::vector<FGroup>&>(conductor.get_f_groups()))
+    {
+        double new_factor = inf_1(g.ability_factor() * this_ability);
+        new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * JOIN_DIS_FACTOR));
+        if (new_factor < JOIN_THRESHOLD && new_factor > cur_factor)
+            cur_factor = new_factor, target = &g;
+    }
+    if (! cur_factor) return false;
+    std::vector<FUnit*> _member;
+    for (FUnit *u : member)
+        if (dis2(u->get_entity()->pos, target->center()) < JOIN_DIS2_THRESHOLD)
+            target->add_member(u);
+        else
+            _member.push_back(u), u->move(target->center());
+    member = std::move(_member);
+    return true;
+}
+
+bool FGroup::checkSplit()
+{
+    if (ability_factor() < SPLIT_THRESHOLD || member.size() < 2) return false;
+    FGroup newGroup;
+    for (int i=member.size()/2; i>0; i--)
+    {
+        newGroup.add_member(member.back());
+        member.pop_back();
+    }
+    const_cast<std::vector<FGroup>&>(conductor.get_f_groups()).push_back(std::move(newGroup));
+    return true;
+}
+
+bool FGroup::checkSearch()
+{
+    for (FUnit *u : member)
+        u->move(MINE_POS[0]);
+    return true;
+}
+
+void FGroup::action()
+{
+    if (checkAttack()) return;
+    if (checkMine()) return;
+    if (checkJoin()) return;
+    if (checkSplit()) return;
+    if (checkSearch()) return;
 }
 
 /********************************/
@@ -510,6 +645,7 @@ void Conductor::check_buyback_hero()
 {
     // TODO
 }
+
 void Conductor::check_callback_hero()
 {
     // TODO
@@ -537,7 +673,20 @@ void Conductor::work()
     check_callback_hero();
     check_update_hero();
 
-    for (const PUnit *u : console->friendlyUnits())
+    for (auto i=fGroups.begin(); i!=fGroups.end(); i++)
+        if (i->get_member().empty())
+        {
+            std::vector<FGroup> _fGroups;
+            for (FGroup &g : fGroups)
+                if (! g.get_member().empty())
+                    _fGroups.push_back(std::move(g));
+            fGroups = std::move(_fGroups);
+            break;
+        }
+
+    UnitFilter filterAvoidBase;
+    filterAvoidBase.setAvoidFilter("militarybase");
+    for (const PUnit *u : console->friendlyUnits(filterAvoidBase))
     {
         FUnit *obj = conductor.get_f_unit(u->id);
         if (! obj->get_belongs())
