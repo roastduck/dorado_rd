@@ -2,6 +2,7 @@
 #include <map>
 #include <cmath>
 #include <vector>
+#include <string>
 #include <fstream>
 #include <exception>
 #include <algorithm>
@@ -53,6 +54,15 @@ const double DEF_STRENGTH_FACTOR = 0.7;
 const double SPEED_STRENGTH_FACTOR = 0.5;
 const double RANGE_STRENGTH_FACTOR = 0.9;
 
+const double HP_VALUE_FACTOR = 1.0;
+const double DEF_VALUE_FACTOR = 0.9;
+const double ATK_VALUE_FACTOR = 1.0;
+const double MP_VALUE_FACTOR = 1.0;
+const double DIZZY_VALUE_RATE = 1.5;
+const double WAITREVIVE_VALUE_RATE = 5.0;
+const double WINORDIE_VALUE_RATE = 5.0;
+const double ISMINING_VALUE_RATE = 2.0;
+
 const double DANGER_FACTOR = 1.0;
 const double ABILITY_FACTOR = 1.0;
 
@@ -85,7 +95,7 @@ class Character // base class. default action
 {
     // remember to use virtual member
 public:
-    int id, typeId;
+    int id;
     Character(int _id);
 
     PUnit *get_entity();
@@ -95,7 +105,34 @@ public:
 
     virtual void attack(const EGroup &target);
     virtual void move(const Pos &p);
-    virtual void mine(const EGroup &target);
+};
+
+class HammerGuard : public Character
+{
+public:
+    HammerGuard(int _id) : Character(_id) {}
+    virtual void attack(const EGroup &target);
+};
+
+class Master : public Character
+{
+public:
+    Master(int _id) : Character(_id) {}
+    virtual void attack(const EGroup &target);
+};
+
+class Berserker : public Character
+{
+public:
+    Berserker(int _id) : Character(_id) {}
+    virtual void attack(const EGroup &target);
+};
+
+class Scouter : public Character
+{
+public:
+    Scouter(int _id) : Character(_id) {}
+    virtual void attack(const EGroup &target);
 };
 
 /********************************/
@@ -110,9 +147,9 @@ class Unit
 
 protected:
     int id;
-    Character character;
+    Character *character;
     CampGroup *belongs;
-
+    
 public:
     int get_id() const
     {
@@ -132,6 +169,9 @@ public:
     Unit<CampGroup, CampUnit> &operator=(const Unit<CampGroup, CampUnit> &) = delete;
     Unit(Unit<CampGroup, CampUnit> &&) = delete;
     Unit<CampGroup, CampUnit> &operator=(Unit<CampGroup, CampUnit> &&) = delete;
+    ~Unit();
+    
+    double strength_factor() const;
 };
 
 template <class CampGroup, class CampUnit>
@@ -189,7 +229,6 @@ public:
         return Pos(ret.x / member.size(), ret.y / member.size());
     }
 
-    double strength_factor() const;
     void logMsg() const;
 };
 
@@ -199,13 +238,16 @@ int Group<CampGroup, CampUnit>::groupIdCnt;
 class EUnit : public Unit<EGroup, EUnit> // Enemy Unit
 {
     friend EGroup;
-
+    
 public:
     EUnit(int _id);
     EUnit(const EUnit &) = delete;
     EUnit &operator=(const EUnit &) = delete;
     EUnit(EUnit &&) = delete;
     EUnit &operator=(EUnit &&) = delete;
+    
+    double danger_factor() const;
+    double value_factor() const;
 };
 
 class FUnit : public Unit<FGroup, FUnit> // Friend Unit
@@ -217,13 +259,15 @@ class FUnit : public Unit<FGroup, FUnit> // Friend Unit
     void attack(const EGroup &target);
     void move(const Pos &p);
     void mine(const EGroup &target);
-
+    
 public:
     FUnit(int _id);
     FUnit(const FUnit &) = delete;
     FUnit &operator=(const FUnit &) = delete;
     FUnit(FUnit &&) = delete;
     FUnit &operator=(FUnit &&) = delete;
+    
+    double ability_factor() const;
 };
 
 class EGroup : public Group<EGroup, EUnit> // Enemy Group
@@ -233,6 +277,7 @@ public:
 
     //functions below return in [0,1]
     double danger_factor() const;
+    double value_factor() const;
     double mine_factor() const;
 };
 
@@ -368,38 +413,58 @@ int Character::get_group_range() const
 
 void Character::attack(const EGroup &target)
 {
-    int targetId = -1, curdis2;
+    const EUnit *targetUnit;
+    double val(0);
     for (const EUnit *e : target.get_member())
     {
-        int newdis2 = dis2(e->get_entity()->pos, get_entity()->pos);
-        if (! ~targetId || newdis2 < curdis2)
-            curdis2 = newdis2, targetId = e->get_id();
+        double _val = e->value_factor();
+        if (_val > val)
+            val = _val, targetUnit = e;
     }
-    if (! ~targetId)
+    mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
+    console->attack(targetUnit->get_entity(), get_entity());
+}
+
+void HammerGuard::attack(const EGroup &target)
+{
+    if (get_entity()->mp >= HAMMERATTACK_MP)
+    {
+        const EUnit *targetUnit;
+        double val(0);
         for (const EUnit *e : target.get_member())
         {
-            std::vector<Pos> path;
-            findShortestPath
-                (conductor.get_map(), get_entity()->pos, e->get_entity()->pos, path);
-            int newdis2 = length(path);
-            if (! ~targetId || newdis2 < curdis2)
-                curdis2 = newdis2, targetId = e->get_id();
+            double _val = e->danger_factor();
+            if (_val > val)
+                val = _val, targetUnit = e;
         }
-    console->attack(conductor.get_p_unit(targetId), get_entity());
+        mylog << "UnitAction : Unit " << id << " : hammerattack unit " << targetUnit->get_id() << std::endl;
+        console->useSkill("hammerattack", targetUnit->get_entity(), get_entity());
+    } else
+        Character::attack(target);
+}
+
+void Master::attack(const EGroup &target)
+{
+    // TODO
+    Character::attack(target);
+}
+
+void Berserker::attack(const EGroup &target)
+{
+    // TODO
+    Character::attack(target);
+}
+
+void Scouter::attack(const EGroup &target)
+{
+    // TODO
+    Character::attack(target);
 }
 
 void Character::move(const Pos &p)
 {
+    mylog << "UnitAction : Unit " << id << " : move " << p << std::endl;
     console->move(p, get_entity());
-}
-
-void Character::mine(const EGroup &target)
-{
-    auto member = target.get_member();
-    if (member.size() == 1 && lowerCase(member.front()->get_entity()->name) == "mine")
-        move(member.front()->get_entity()->pos);
-    else
-        attack(target);
 }
 
 /********************************/
@@ -408,7 +473,20 @@ void Character::mine(const EGroup &target)
 
 template <class CampGroup, class CampUnit>
 Unit<CampGroup, CampUnit>::Unit(int _id)
-    : id(_id), character(id), belongs(0) {}
+    : id(_id), belongs(0)
+{
+    std::string name = lowerCase(conductor.get_p_unit(id)->name);
+    if (name == "hammerguard")
+        character = new HammerGuard(id);
+    else if (name == "master")
+        character = new Master(id);
+    else if (name == "berserker")
+        character = new Berserker(id);
+    else if (name == "scouter")
+        character = new Scouter(id);
+    else
+        character = new Character(id);
+}
 
 template <class CampGroup, class CampUnit>
 inline PUnit *Unit<CampGroup, CampUnit>::get_entity()
@@ -422,6 +500,84 @@ inline const PUnit *Unit<CampGroup, CampUnit>::get_entity() const
     return conductor.get_p_unit(id);
 }
 
+template <class CampGroup, class CampUnit>
+Unit<CampGroup, CampUnit>::~Unit()
+{
+    delete character;
+}
+
+template <class CampGroup, class CampUnit>
+double Unit<CampGroup, CampUnit>::strength_factor() const
+{
+    double val(0), ava(0), tot(0);
+
+    console->selectUnit(get_entity());
+
+    if (lowerCase(get_entity()->name) == "observer")
+    {
+        ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
+        tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
+        val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
+    } else
+    {
+        ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
+        tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
+        if (get_entity()->isHero())
+        {
+            ava += console->unitArg("mp","c") * MP_STRENGTH_FACTOR;
+            tot += console->unitArg("mp","m") * MP_STRENGTH_FACTOR;
+        }
+        val += console->unitArg("atk","c") * ATK_STRENGTH_FACTOR;
+        val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
+        if (! get_entity()->isBase() && ! get_entity()->isMine())
+            val += console->unitArg("speed","c") * SPEED_STRENGTH_FACTOR;
+    }
+    console->selectUnit(0);
+
+    return val * ava / tot;
+}
+
+double EUnit::value_factor() const
+{
+    double danger, hp, def;
+
+    console->selectUnit(get_entity());
+
+    // may consider recover rate
+    if (lowerCase(get_entity()->name) == "observer")
+    {
+        hp += console->unitArg("hp","c") * HP_VALUE_FACTOR;
+        def += console->unitArg("def","c") * DEF_VALUE_FACTOR;
+    } else
+    {
+        hp += console->unitArg("hp","c") * HP_VALUE_FACTOR;
+        if (get_entity()->isHero())
+        {
+            danger += console->unitArg("mp","c") * MP_VALUE_FACTOR;
+        }
+        danger += console->unitArg("atk","c") * ATK_VALUE_FACTOR;
+        def += console->unitArg("def","c") * DEF_VALUE_FACTOR;
+    }
+    if (console->getBuff("dizzy", get_entity())) danger *= DIZZY_VALUE_RATE;
+    if (console->getBuff("waitrevive", get_entity())) danger *= WAITREVIVE_VALUE_RATE;
+    if (console->getBuff("winordie", get_entity())) danger *= WINORDIE_VALUE_RATE;
+    if (console->getBuff("ismining", get_entity())) danger *= ISMINING_VALUE_RATE;
+
+    console->selectUnit(0);
+
+    return danger / inf_1(hp * def);
+}
+
+inline double EUnit::danger_factor() const
+{
+    return strength_factor() * DANGER_FACTOR;
+}
+
+inline double FUnit::ability_factor() const
+{
+    return strength_factor() * ABILITY_FACTOR;
+}
+
 EUnit::EUnit(int _id)
     : Unit<EGroup, EUnit>(_id) {}
 
@@ -431,22 +587,32 @@ FUnit::FUnit(int _id)
 void FUnit::attack(const EGroup &target)
 {
     if (madeAction == console->round()) return;
+    
+    character->attack(target);
+    
     madeAction = console->round();
-    character.attack(target);
 }
 
 void FUnit::move(const Pos &p)
 {
     if (madeAction == console->round()) return;
+    
+    character->move(p);
+    
     madeAction = console->round();
-    character.move(p);
 }
 
 void FUnit::mine(const EGroup &target)
 {
     if (madeAction == console->round()) return;
+    
+    auto member = target.get_member();
+    if (member.size() == 1 && lowerCase(member.front()->get_entity()->name) == "mine")
+        move(member.front()->get_entity()->pos);
+    else
+        attack(target);
+    
     madeAction = console->round();
-    character.mine(target);
 }
 
 /********************************/
@@ -473,7 +639,7 @@ void EGroup::add_adj_members_recur(EUnit *unit)
     add_member(unit);
     UnitFilter filter;
     filter.setAreaFilter
-        (new Circle(unit->get_entity()->pos, unit->character.get_group_range()), "a");
+        (new Circle(unit->get_entity()->pos, unit->character->get_group_range()), "a");
     // including mine
     for (const PUnit *item : console->enemyUnits(filter))
         if (! idExist(item->id))
@@ -481,46 +647,9 @@ void EGroup::add_adj_members_recur(EUnit *unit)
 }
 
 template <class CampGroup, class CampUnit>
-double Group<CampGroup, CampUnit>::strength_factor() const
-{
-    double ret(0);
-    for (const CampUnit *e : member)
-    {
-        double val(0), ava(0), tot(0);
-
-        console->selectUnit(e->get_entity());
-
-        // may consider recover rate
-        if (lowerCase(e->get_entity()->name) == "observer")
-        {
-            ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
-            tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
-            val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
-        } else
-        {
-            ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
-            tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
-            if (e->get_entity()->isHero())
-            {
-                ava += console->unitArg("mp","c") * MP_STRENGTH_FACTOR;
-                tot += console->unitArg("mp","m") * MP_STRENGTH_FACTOR;
-            }
-            val += console->unitArg("atk","c") * ATK_STRENGTH_FACTOR;
-            val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
-            if (! e->get_entity()->isBase() && ! e->get_entity()->isMine())
-                val += console->unitArg("speed","c") * SPEED_STRENGTH_FACTOR;
-        }
-        ret += val * ava / tot;
-
-        console->selectUnit(0);
-    }
-    return inf_1(ret);
-}
-
-template <class CampGroup, class CampUnit>
 void Group<CampGroup, CampUnit>::logMsg() const
 {
-    mylog << "Action : Group " << groupId << " : { ";
+    mylog << "GroupAction : Group " << groupId << " : { ";
     for (const CampUnit *u : member)
         mylog << u->id << ", ";
     mylog << "}" << std::endl;
@@ -528,12 +657,26 @@ void Group<CampGroup, CampUnit>::logMsg() const
 
 double EGroup::danger_factor() const
 {
-    return strength_factor() * DANGER_FACTOR;
+    double ret(0);
+    for (const EUnit *e : member)
+        ret += e->danger_factor();
+    return inf_1(ret);
 }
 
 double FGroup::ability_factor() const
 {
-    return strength_factor() * ABILITY_FACTOR;
+    double ret(0);
+    for (const FUnit *e : member)
+        ret += e->ability_factor();
+    return inf_1(ret);
+}
+
+double EGroup::value_factor() const
+{
+    double ret(0);
+    for (const EUnit *e : member)
+        ret += e->value_factor();
+    return inf_1(ret);
 }
 
 double EGroup::mine_factor() const
@@ -567,7 +710,7 @@ bool FGroup::checkMine()
     if (! cur_factor) return false;
     for (FUnit *u : member)
         u->mine(*target);
-    mylog << "Action : Group " << groupId << " : mine Group " << target->groupId << std::endl;
+    mylog << "GroupAction : Group " << groupId << " : mine Group " << target->groupId << std::endl;
     return true;
 }
 
@@ -592,7 +735,7 @@ bool FGroup::checkJoin()
         else
             _member.push_back(u), u->move(target->center());
     member = std::move(_member);
-    mylog << "Action : Group " << groupId << " : join Group " << target->groupId << std::endl;
+    mylog << "GroupAction : Group " << groupId << " : join Group " << target->groupId << std::endl;
     return true;
 }
 
@@ -606,7 +749,7 @@ bool FGroup::checkSplit()
         member.pop_back();
     }
     const_cast<std::vector<FGroup>&>(conductor.get_f_groups()).push_back(std::move(newGroup));
-    mylog << "Action : Group " << groupId << " : split " << std::endl;
+    mylog << "GroupAction : Group " << groupId << " : split " << std::endl;
     return true;
 }
 
@@ -614,7 +757,7 @@ bool FGroup::checkSearch()
 {
     for (FUnit *u : member)
         u->move(MINE_POS[0]);
-    mylog << "Action : Group " << groupId << " : search " << std::endl;
+    mylog << "GroupAction : Group " << groupId << " : search " << std::endl;
     return true;
 }
 
@@ -631,7 +774,7 @@ void FGroup::action()
 /********************************/
 
 inline Character::Character(int _id)
-    : id(_id), typeId(conductor.get_p_unit(id)->typeId) {}
+    : id(_id) {}
 
 double Conductor::need_buy_hammerguard() const
 {
