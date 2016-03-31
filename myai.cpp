@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <fstream>
+#include <typeinfo>
 #include <exception>
 #include <algorithm>
 #include "sdk.h"
@@ -36,7 +37,7 @@ const double pi = acos(-1);
 
 inline double inf_1(double x)
 {
-    return atan(x) / pi * 2;
+    return atan(x * 2) / pi * 2;
 }
 
 /********************************/
@@ -69,9 +70,11 @@ const double ABILITY_FACTOR = 1.0;
 const double MINE_THRESHOLD = 0.2;
 const double MINE_DIS_FACTOR = 0.1;
 
-const double JOIN_THRESHOLD = 0.4;
-const double JOIN_DIS_FACTOR = 0.4;
+const double JOIN_THRESHOLD = 6.0;
+const double JOIN_DIS_FACTOR = 0.1;
 const int JOIN_DIS2_THRESHOLD = 100;
+
+const int ENEMY_JOIN_DIS2 = 100;
 
 const double SPLIT_THRESHOLD = 0.9;
 
@@ -100,8 +103,6 @@ public:
 
     PUnit *get_entity();
     const PUnit *get_entity() const;
-
-    virtual int get_group_range() const;
 
     virtual void attack(const EGroup &target);
     virtual void move(const Pos &p);
@@ -387,6 +388,8 @@ public:
     {
         return fGroups;
     }
+    
+    double map_danger_factor(const Pos &p) const;
 
     void init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd);
     void work();
@@ -404,11 +407,6 @@ inline PUnit *Character::get_entity()
 inline const PUnit *Character::get_entity() const
 {
     return conductor.get_p_unit(id);
-}
-
-int Character::get_group_range() const
-{
-    return get_entity()->range * ENEMY_GROUP_FACTOR;
 }
 
 void Character::attack(const EGroup &target)
@@ -429,16 +427,20 @@ void HammerGuard::attack(const EGroup &target)
 {
     if (get_entity()->mp >= HAMMERATTACK_MP)
     {
-        const EUnit *targetUnit;
+        const EUnit *targetUnit(0);
         double val(0);
         for (const EUnit *e : target.get_member())
         {
             double _val = e->danger_factor();
-            if (_val > val)
+            if (_val > val && dis2(get_entity()->pos, e->get_entity()->pos) <= HAMMERATTACK_RANGE)
                 val = _val, targetUnit = e;
         }
-        mylog << "UnitAction : Unit " << id << " : hammerattack unit " << targetUnit->get_id() << std::endl;
-        console->useSkill("hammerattack", targetUnit->get_entity(), get_entity());
+        if (targetUnit)
+        {
+            mylog << "UnitAction : Unit " << id << " : hammerattack unit " << targetUnit->get_id() << std::endl;
+            console->useSkill("hammerattack", targetUnit->get_entity(), get_entity());
+        } else
+            Character::attack(target);
     } else
         Character::attack(target);
 }
@@ -539,7 +541,7 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
 
 double EUnit::value_factor() const
 {
-    double danger, hp, def;
+    double danger(0), hp(0), def(0);
 
     console->selectUnit(get_entity());
 
@@ -565,7 +567,7 @@ double EUnit::value_factor() const
 
     console->selectUnit(0);
 
-    return danger / inf_1(hp * def);
+    return danger / inf_1(hp * def / 5000);
 }
 
 inline double EUnit::danger_factor() const
@@ -639,7 +641,7 @@ void EGroup::add_adj_members_recur(EUnit *unit)
     add_member(unit);
     UnitFilter filter;
     filter.setAreaFilter
-        (new Circle(unit->get_entity()->pos, unit->character->get_group_range()), "a");
+        (new Circle(unit->get_entity()->pos, ENEMY_JOIN_DIS2), "a");
     // including mine
     for (const PUnit *item : console->enemyUnits(filter))
         if (! idExist(item->id))
@@ -649,7 +651,7 @@ void EGroup::add_adj_members_recur(EUnit *unit)
 template <class CampGroup, class CampUnit>
 void Group<CampGroup, CampUnit>::logMsg() const
 {
-    mylog << "GroupAction : Group " << groupId << " : { ";
+    mylog << "GroupMember : " << typeid(CampGroup).name() << " : Group " << groupId << " : { ";
     for (const CampUnit *u : member)
         mylog << u->id << ", ";
     mylog << "}" << std::endl;
@@ -660,7 +662,7 @@ double EGroup::danger_factor() const
     double ret(0);
     for (const EUnit *e : member)
         ret += e->danger_factor();
-    return inf_1(ret);
+    return inf_1(ret / 200);
 }
 
 double FGroup::ability_factor() const
@@ -668,7 +670,7 @@ double FGroup::ability_factor() const
     double ret(0);
     for (const FUnit *e : member)
         ret += e->ability_factor();
-    return inf_1(ret);
+    return inf_1(ret / 200);
 }
 
 double EGroup::value_factor() const
@@ -676,7 +678,7 @@ double EGroup::value_factor() const
     double ret(0);
     for (const EUnit *e : member)
         ret += e->value_factor();
-    return inf_1(ret);
+    return inf_1(ret / 200);
 }
 
 double EGroup::mine_factor() const
@@ -718,12 +720,15 @@ bool FGroup::checkJoin()
 {
     FGroup *target = 0;
     double this_ability = ability_factor();
+    double that_udanger = -conductor.map_danger_factor(center());
     double cur_factor = 0.0;
     for (FGroup &g : const_cast<std::vector<FGroup>&>(conductor.get_f_groups()))
-        if (! g.member.empty())
+        if (! g.member.empty() && g.groupId != groupId)
         {
-            double new_factor = inf_1(g.ability_factor() * this_ability);
-            new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * JOIN_DIS_FACTOR));
+            double new_factor = (g.ability_factor() + this_ability) * that_udanger * 10;
+            //new_factor = new_factor * inf_1(pow(dis2(center(), g.center()), JOIN_DIS_FACTOR));
+            new_factor -= inf_1(dis(center(), g.center()) / 100) * JOIN_DIS_FACTOR;
+            //std::cout << new_factor << std::endl;
             if (new_factor < JOIN_THRESHOLD && new_factor > cur_factor)
                 cur_factor = new_factor, target = &g;
         }
@@ -741,7 +746,7 @@ bool FGroup::checkJoin()
 
 bool FGroup::checkSplit()
 {
-    if (ability_factor() < SPLIT_THRESHOLD || member.size() < 2) return false;
+    if (ability_factor()*conductor.map_danger_factor(center()) < SPLIT_THRESHOLD || member.size() < 2) return false;
     FGroup newGroup;
     for (int i=member.size()/2; i>0; i--)
     {
@@ -801,6 +806,17 @@ double Conductor::need_buy_hero() const
     return (double)console->gold() / console->property();
 }
 
+double Conductor::map_danger_factor(const Pos &p) const
+{
+    double x(p.x), y(p.y), tot(0);
+    tot += 2.0 / pow(dis2(Pos(x,y), MILITARY_BASE_POS[1-console->camp()]), 0.1);
+    for (int i=0; i<4; i++)
+        tot += 0.7 / pow(dis2(Pos(x,y), Dragon_pos[i]), 0.2);
+    for (int i=0; i<2; i++)
+        tot += 0.7 / pow(dis2(Pos(x,y), Roshan_pos[i]), 0.2);
+    return log(inf_1(pow(tot, 3.0) / 2)) * 4;
+}
+
 void Conductor::enemy_make_groups()
 {
     eGroups.clear();
@@ -809,6 +825,7 @@ void Conductor::enemy_make_groups()
         {
             eGroups.push_back(EGroup());
             eGroups.back().add_adj_members_recur(get_e_unit(item->id));
+            eGroups.back().logMsg();
         }
 }
 
