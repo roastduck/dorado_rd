@@ -40,11 +40,15 @@ inline double inf_1(double x)
     return atan(x * 2) / pi * 2;
 }
 
+template <class T>
+inline T sqr(T x)
+{
+    return x*x;
+}
+
 /********************************/
 /*     Global Variables         */
 /********************************/
-
-const double ENEMY_GROUP_FACTOR = 1.5;
 
 const double BUY_HERO_THRESHOLD = 0.4;
 
@@ -68,7 +72,7 @@ const double ISMINING_VALUE_RATE = 2.0;
 const double DANGER_FACTOR = 1.0;
 const double ABILITY_FACTOR = 1.0;
 
-const double MINE_THRESHOLD = 0.2;
+const double MINE_THRESHOLD = 0.0; // remember we have this
 const double MINE_DIS_FACTOR = 0.1;
 
 const int JOIN_DIS2_THRESHOLD = 100;
@@ -117,7 +121,7 @@ class Master : public Character
 {
 public:
     Master(int _id) : Character(_id) {}
-    virtual void attack(const EGroup &target);
+    virtual void move(const Pos &p);
 };
 
 class Berserker : public Character
@@ -131,6 +135,7 @@ class Scouter : public Character
 {
 public:
     Scouter(int _id) : Character(_id) {}
+    virtual void move(const Pos &p);
     virtual void attack(const EGroup &target);
 };
 
@@ -279,6 +284,8 @@ public:
     double danger_factor() const;
     double value_factor() const;
     double mine_factor() const;
+    
+    void logMsg() const;
 };
 
 class FGroup : public Group<FGroup, FUnit> // Friend Group
@@ -413,16 +420,34 @@ inline const PUnit *Character::get_entity() const
 
 void Character::attack(const EGroup &target)
 {
-    const EUnit *targetUnit;
-    double val(0);
-    for (const EUnit *e : target.get_member())
+    const EUnit *targetUnit(0);
+    double val(-INFINITY);
+    if (get_entity()->findSkill("attack")->cd == 0)
+        for (const EUnit *e : target.get_member())
+        {
+            if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
+            double _val = e->value_factor();
+            if (_val > val)
+                val = _val, targetUnit = e;
+        }
+    if (! targetUnit)
+        for (const EUnit *e : target.get_member())
+        {
+            double _val = e->value_factor();
+            if (_val > val)
+                val = _val, targetUnit = e;
+        }
+    if (targetUnit)
     {
-        double _val = e->value_factor();
-        if (_val > val)
-            val = _val, targetUnit = e;
+        mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
+        console->attack(targetUnit->get_entity(), get_entity());
     }
-    mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
-    console->attack(targetUnit->get_entity(), get_entity());
+}
+
+void Character::move(const Pos &p)
+{
+    mylog << "UnitAction : Unit " << id << " : move " << p << std::endl;
+    console->move(p, get_entity());
 }
 
 void HammerGuard::attack(const EGroup &target)
@@ -430,7 +455,7 @@ void HammerGuard::attack(const EGroup &target)
     if (get_entity()->mp >= HAMMERATTACK_MP && get_entity()->findSkill("hammerattack")->cd == 0)
     {
         const EUnit *targetUnit(0);
-        double val(0);
+        double val(-INFINITY);
         for (const EUnit *e : target.get_member())
         {
             double _val = e->danger_factor();
@@ -447,28 +472,93 @@ void HammerGuard::attack(const EGroup &target)
         Character::attack(target);
 }
 
-void Master::attack(const EGroup &target)
+void Master::move(const Pos &p)
 {
-    // TODO
-    Character::attack(target);
+    if (
+        conductor.get_f_unit(id)->get_belongs()->get_member().size() == 1 && 
+        get_entity()->mp >= BLINK_MP && get_entity()->findSkill("blink")->cd == 0
+       )
+    {
+        Pos q(get_entity()->pos), _p(q+(p-q)*std::min(1, (int)(sqrt(BLINK_RANGE)/dis(p,q))));
+        mylog << "UnitAction : Unit " << id << " : blink " << _p << std::endl;
+        console->useSkill("blink", _p, get_entity());
+    } else
+        Character::move(p);
 }
 
 void Berserker::attack(const EGroup &target)
 {
-    // TODO
-    Character::attack(target);
+    if (! console->getBuff("beattacked", get_entity()) && get_entity()->findSkill("sacrifice")->cd == 0)
+    {
+        const EUnit *targetUnit(0);
+        double val(-INFINITY);
+        if (get_entity()->findSkill("attack")->cd == 0)
+            for (const EUnit *e : target.get_member())
+            {
+                if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
+                double _val = e->value_factor();
+                if (_val > val)
+                    val = _val, targetUnit = e;
+            }
+        if (! targetUnit)
+            for (const EUnit *e : target.get_member())
+            {
+                double _val = e->value_factor();
+                if (_val > val)
+                    val = _val, targetUnit = e;
+            }
+        if (targetUnit && dis2(targetUnit->get_entity()->pos, get_entity()->pos) <= get_entity()->range)
+        {
+            mylog << "UnitAction : Unit " << id << " : sacrifice" << std::endl;
+            console->useSkill("sacrifice", NULL, get_entity());
+        } else
+            Character::attack(target);
+    } else
+        Character::attack(target);
+}
+
+void Scouter::move(const Pos &p)
+{
+    if (get_entity()->mp >= SET_OBSERVER_MP && get_entity()->findSkill("setobserver")->cd == 0)
+    {
+        UnitFilter filter;
+        filter.setAreaFilter(new Circle(get_entity()->pos, SET_OBSERVER_RANGE), "a");
+        filter.setTypeFilter("mine", "a");
+        auto mines = console->enemyUnits(filter);
+        if (! mines.empty())
+        {
+            Pos _p;
+            do
+                _p = console->randPosInArea(mines.front()->pos, MINING_RANGE);
+            while (! Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p));
+            mylog << "UnitAction : Unit " << id << " : set observer " << _p << std::endl;
+            console->useSkill("setobserver", _p, get_entity());
+        } else
+            Character::move(p);
+    } else
+        Character::move(p);
 }
 
 void Scouter::attack(const EGroup &target)
 {
-    // TODO
-    Character::attack(target);
-}
-
-void Character::move(const Pos &p)
-{
-    mylog << "UnitAction : Unit " << id << " : move " << p << std::endl;
-    console->move(p, get_entity());
+    if (get_entity()->mp >= SET_OBSERVER_MP && get_entity()->findSkill("setobserver")->cd == 0)
+    {
+        UnitFilter filter;
+        filter.setAreaFilter(new Circle(get_entity()->pos, SET_OBSERVER_RANGE), "a");
+        filter.setTypeFilter("mine", "a");
+        auto mines = console->enemyUnits(filter);
+        if (! mines.empty())
+        {
+            Pos _p;
+            do
+                _p = console->randPosInArea(mines.front()->pos, MINING_RANGE);
+            while (! Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p));
+            mylog << "UnitAction : Unit " << id << " : set observer " << _p << std::endl;
+            console->useSkill("setobserver", _p, get_entity());
+        } else
+            Character::attack(target);
+    } else
+        Character::attack(target);
 }
 
 /********************************/
@@ -513,6 +603,8 @@ Unit<CampGroup, CampUnit>::~Unit()
 template <class CampGroup, class CampUnit>
 double Unit<CampGroup, CampUnit>::strength_factor() const
 {
+    if (lowerCase(get_entity()->name) == "mine") return 0;
+    
     double val(0), ava(0), tot(0);
 
     console->selectUnit(get_entity());
@@ -543,6 +635,8 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
 
 double EUnit::value_factor() const
 {
+    if (lowerCase(get_entity()->name) == "mine") return 0;
+    
     double danger(0), hp(0), def(0);
 
     console->selectUnit(get_entity());
@@ -584,7 +678,7 @@ inline double FUnit::ability_factor() const
 
 inline double FUnit::health_factor() const
 {
-    return console->unitArg("hp","c",get_entity()) / console->unitArg("hp","m",get_entity());
+    return (double)console->unitArg("hp","c",get_entity()) / console->unitArg("hp","m",get_entity());
 }
 
 EUnit::EUnit(int _id)
@@ -662,6 +756,12 @@ void Group<CampGroup, CampUnit>::logMsg() const
     for (const CampUnit *u : member)
         mylog << u->id << ", ";
     mylog << "}" << std::endl;
+}
+
+void EGroup::logMsg() const
+{
+    Group<EGroup, EUnit>::logMsg();
+    mylog << "GroupStatus : EGroup : Group " << groupId << " mine_factor = " << mine_factor() << std::endl;
 }
 
 double EGroup::danger_factor() const
@@ -773,7 +873,13 @@ bool FGroup::checkSplit()
     for (int i=member.size()/2; i>0; i--)
     {
         if (member.back()->health_factor() < GOBACK_THRESHOLD)
-            newGroup.add_member(member.back()), idSet.erase(member.back()->id);
+        {
+            newGroup.add_member(member.back());
+            idSet.erase(member.back()->id);
+            mylog << "UnitStatus : Unit " << member.back()->id
+                  << " : health_factor() = " << member.back()->health_factor()
+                  << " , hp = " << member.back()->get_entity()->hp << std::endl;
+        }
         else
             _member.push_back(member.back());
         member.pop_back();
@@ -931,9 +1037,10 @@ void Conductor::work()
     check_callback_hero();
     check_upgrade_hero();
 
-    UnitFilter filterAvoidBase;
-    filterAvoidBase.setAvoidFilter("militarybase");
-    for (const PUnit *u : console->friendlyUnits(filterAvoidBase))
+    UnitFilter filter;
+    filter.setAvoidFilter("militarybase");
+    filter.setAvoidFilter("observer");
+    for (const PUnit *u : console->friendlyUnits(filter))
     {
         FUnit *obj = conductor.get_f_unit(u->id);
         if (! obj->get_belongs())
@@ -989,3 +1096,6 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 
 #undef conductor
 
+/* OPTIMIZE NOTE:
+ * all the factors can be cached (may use macros to wrap functions
+ */
