@@ -54,6 +54,7 @@ const double ATK_STRENGTH_FACTOR = 1.0;
 const double DEF_STRENGTH_FACTOR = 0.7;
 const double SPEED_STRENGTH_FACTOR = 0.5;
 const double RANGE_STRENGTH_FACTOR = 0.9;
+const double OBSERVER_FACTOR_RATE = 0.1;
 
 const double HP_VALUE_FACTOR = 1.0;
 const double DEF_VALUE_FACTOR = 0.9;
@@ -70,13 +71,10 @@ const double ABILITY_FACTOR = 1.0;
 const double MINE_THRESHOLD = 0.2;
 const double MINE_DIS_FACTOR = 0.1;
 
-const double JOIN_THRESHOLD = 6.0;
-const double JOIN_DIS_FACTOR = 0.1;
 const int JOIN_DIS2_THRESHOLD = 100;
-
 const int ENEMY_JOIN_DIS2 = 100;
 
-const double SPLIT_THRESHOLD = 0.9;
+const double GOBACK_THRESHOLD = 0.2;
 
 static Console *console = 0;
 
@@ -269,6 +267,7 @@ public:
     FUnit &operator=(FUnit &&) = delete;
     
     double ability_factor() const;
+    double health_factor() const;
 };
 
 class EGroup : public Group<EGroup, EUnit> // Enemy Group
@@ -284,6 +283,7 @@ public:
 
 class FGroup : public Group<FGroup, FUnit> // Friend Group
 {
+    bool checkGoback();
     bool checkAttack();
     bool checkMine();
     bool checkSearch();
@@ -295,6 +295,8 @@ public:
     
     bool checkJoin();
     bool checkSplit();
+    
+    double health_factor() const;
 };
 
 /********************************/
@@ -342,7 +344,7 @@ private:
     void check_buy_hero();
     void check_buyback_hero();
     void check_callback_hero();
-    void check_update_hero();
+    void check_upgrade_hero();
 
 public:
     const PMap &get_map() const
@@ -425,7 +427,7 @@ void Character::attack(const EGroup &target)
 
 void HammerGuard::attack(const EGroup &target)
 {
-    if (get_entity()->mp >= HAMMERATTACK_MP)
+    if (get_entity()->mp >= HAMMERATTACK_MP && get_entity()->findSkill("hammerattack")->cd == 0)
     {
         const EUnit *targetUnit(0);
         double val(0);
@@ -517,7 +519,7 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
 
     if (lowerCase(get_entity()->name) == "observer")
     {
-        ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
+        ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR * OBSERVER_FACTOR_RATE;
         tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
         val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
     } else
@@ -578,6 +580,11 @@ inline double EUnit::danger_factor() const
 inline double FUnit::ability_factor() const
 {
     return strength_factor() * ABILITY_FACTOR;
+}
+
+inline double FUnit::health_factor() const
+{
+    return console->unitArg("hp","c",get_entity()) / console->unitArg("hp","m",get_entity());
 }
 
 EUnit::EUnit(int _id)
@@ -673,6 +680,17 @@ double FGroup::ability_factor() const
     return inf_1(ret / 200);
 }
 
+double FGroup::health_factor() const
+{
+    double tc(0), tm(0);
+    for (const FUnit *e : member)
+    {
+        tc += console->unitArg("hp","c",e->get_entity());
+        tm += console->unitArg("hp","m",e->get_entity());
+    }
+    return tc / tm;
+}
+
 double EGroup::value_factor() const
 {
     double ret(0);
@@ -690,6 +708,15 @@ double EGroup::mine_factor() const
             return 1.0;
     }
     return 0.0;
+}
+
+bool FGroup::checkGoback()
+{
+    if (health_factor() >= GOBACK_THRESHOLD) return false;
+    for (FUnit *u : member)
+        u->move(MILITARY_BASE_POS[console->camp()]);
+    mylog << "GroupAction : Group " << groupId << " : go back " << std::endl;
+    return true;
 }
 
 bool FGroup::checkAttack()
@@ -718,43 +745,44 @@ bool FGroup::checkMine()
 
 bool FGroup::checkJoin()
 {
+    if (member.empty() || health_factor() < GOBACK_THRESHOLD) return false;
     FGroup *target = 0;
-    double this_ability = ability_factor();
-    double that_udanger = -conductor.map_danger_factor(center());
-    double cur_factor = 0.0;
     for (FGroup &g : const_cast<std::vector<FGroup>&>(conductor.get_f_groups()))
-        if (! g.member.empty() && g.groupId != groupId)
+        if (
+            ! g.member.empty() && g.groupId != groupId &&
+            conductor.map_danger_factor(g.center()) > conductor.map_danger_factor(center()) &&
+            dis2(g.center(), center()) <= JOIN_DIS2_THRESHOLD
+           )
         {
-            double new_factor = (g.ability_factor() + this_ability) * that_udanger * 10;
-            //new_factor = new_factor * inf_1(pow(dis2(center(), g.center()), JOIN_DIS_FACTOR));
-            new_factor -= inf_1(dis(center(), g.center()) / 100) * JOIN_DIS_FACTOR;
-            //std::cout << new_factor << std::endl;
-            if (new_factor < JOIN_THRESHOLD && new_factor > cur_factor)
-                cur_factor = new_factor, target = &g;
+            target = &g;
+            break;
         }
-    if (! cur_factor) return false;
-    std::vector<FUnit*> _member;
+    if (! target) return false;
     for (FUnit *u : member)
-        if (dis2(u->get_entity()->pos, target->center()) < JOIN_DIS2_THRESHOLD)
-            target->add_member(u);
-        else
-            _member.push_back(u), u->move(target->center());
-    member = std::move(_member);
+        target->add_member(u);
+    member.clear(), idSet.clear();
     mylog << "GroupAction : Group " << groupId << " : join Group " << target->groupId << std::endl;
     return true;
 }
 
 bool FGroup::checkSplit()
 {
-    if (ability_factor()*conductor.map_danger_factor(center()) < SPLIT_THRESHOLD || member.size() < 2) return false;
+    if (member.size() < 2 || health_factor() < GOBACK_THRESHOLD) return false;
     FGroup newGroup;
+    std::vector<FUnit*> _member;
     for (int i=member.size()/2; i>0; i--)
     {
-        newGroup.add_member(member.back());
+        if (member.back()->health_factor() < GOBACK_THRESHOLD)
+            newGroup.add_member(member.back()), idSet.erase(member.back()->id);
+        else
+            _member.push_back(member.back());
         member.pop_back();
     }
-    const_cast<std::vector<FGroup>&>(conductor.get_f_groups()).push_back(std::move(newGroup));
+    for (auto u : _member)
+        member.push_back(u);
+    if (newGroup.member.empty()) return false;
     mylog << "GroupAction : Group " << groupId << " : split " << std::endl;
+    const_cast<std::vector<FGroup>&>(conductor.get_f_groups()).push_back(std::move(newGroup)); // keep this the last line
     return true;
 }
 
@@ -769,6 +797,7 @@ bool FGroup::checkSearch()
 void FGroup::action()
 {
     logMsg();
+    if (checkGoback()) return;
     if (checkAttack()) return;
     if (checkMine()) return;
     if (checkSearch()) return;
@@ -831,20 +860,25 @@ void Conductor::enemy_make_groups()
 
 void Conductor::check_buy_hero()
 {
-    if (need_buy_hero() < BUY_HERO_THRESHOLD) return;
-    double hammerguard = need_buy_hammerguard(),
-           master = need_buy_master(),
-           berserker = need_buy_berserker(),
-           scouter = need_buy_scouter();
-    double theMax = std::max(std::max(std::max(hammerguard,master),berserker),scouter);
-    if (theMax == hammerguard && NEW_HAMMERGUARD_COST*(hammerguardCnt+1) < console->gold())
-        console->chooseHero("hammerguard"), hammerguardCnt++;
-    else if (theMax == master && NEW_MASTER_COST*(masterCnt+1) < console->gold())
-        console->chooseHero("master"), masterCnt++;
-    else if (theMax == berserker && NEW_BERSERKER_COST*(berserkerCnt+1) < console->gold())
-        console->chooseHero("berserker"), berserkerCnt++;
-    else if (theMax == scouter && NEW_SCOUTER_COST*(scouterCnt+1) < console->gold()) 
-        console->chooseHero("scouter"), scouterCnt++;
+    while (true)
+    {
+        if (need_buy_hero() < BUY_HERO_THRESHOLD) return;
+        double hammerguard = need_buy_hammerguard(),
+               master = need_buy_master(),
+               berserker = need_buy_berserker(),
+               scouter = need_buy_scouter();
+        double theMax = std::max(std::max(std::max(hammerguard,master),berserker),scouter);
+        if (theMax == hammerguard && NEW_HAMMERGUARD_COST*(hammerguardCnt+1) <= console->gold() - console->goldCostCurrentRound())
+            console->chooseHero("hammerguard"), hammerguardCnt++;
+        else if (theMax == master && NEW_MASTER_COST*(masterCnt+1) <= console->gold() - console->goldCostCurrentRound())
+            console->chooseHero("master"), masterCnt++;
+        else if (theMax == berserker && NEW_BERSERKER_COST*(berserkerCnt+1) <= console->gold() - console->goldCostCurrentRound())
+            console->chooseHero("berserker"), berserkerCnt++;
+        else if (theMax == scouter && NEW_SCOUTER_COST*(scouterCnt+1) <= console->gold() - console->goldCostCurrentRound()) 
+            console->chooseHero("scouter"), scouterCnt++;
+        else
+            break;
+    }
 }
 
 void Conductor::check_buyback_hero()
@@ -857,9 +891,27 @@ void Conductor::check_callback_hero()
     // TODO
 }
 
-void Conductor::check_update_hero()
+void Conductor::check_upgrade_hero()
 {
-    // TODO
+    while (true)
+    {
+        UnitFilter filter;
+        filter.setAreaFilter
+            (new Circle(MILITARY_BASE_POS[console->camp()], LEVELUP_RANGE), "a");
+        filter.setAvoidFilter("militarybase");
+        const PUnit *target(0);
+        int cost;
+        for (const PUnit *item : console->friendlyUnits(filter))
+        {
+            int _cost = LEVELUP_COST_PER_LEVEL * item->level + LEVELUP_COST_BASE;
+            if (! target || _cost < cost)
+                cost = _cost, target = item;
+        }
+        if (cost < console->gold() - console->goldCostCurrentRound())
+            console->buyHeroLevel(target);
+        else
+            break;
+    }
 }
 
 void Conductor::init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd)
@@ -877,7 +929,7 @@ void Conductor::work()
     check_buy_hero();
     check_buyback_hero();
     check_callback_hero();
-    check_update_hero();
+    check_upgrade_hero();
 
     UnitFilter filterAvoidBase;
     filterAvoidBase.setAvoidFilter("militarybase");
