@@ -25,20 +25,11 @@ namespace rdai {
     #error CACHE_END defined
 #endif
 
-#define CACHE_BEGIN(type) \
-    static std::unordered_map<const void*,type> cached_value_; \
-    static int cached_round_ = -1, cached_camp_ = -1; \
-    if (console->round() != cached_round_ || console->camp() != cached_camp_) \
-    { \
-        cached_round_ = console->round(); \
-        cached_camp_ = console->camp(); \
-        cached_value_.clear(); \
-    } \
-    if (cached_value_.count(this)) \
-        return cached_value_[this];
+#define CACHE_BEGIN(type)     static std::unordered_map<const void*,type> cached_value_;     static int cached_round_ = -1, cached_camp_ = -1;     if (console->round() != cached_round_ || console->camp() != cached_camp_)     {         cached_round_ = console->round();         cached_camp_ = console->camp();         cached_value_.clear();     }     if (cached_value_.count(this))         return cached_value_[this];
 
-#define CACHE_END(ret) \
-    return cached_value_[this] = (ret);
+#define CACHE_END(ret)     return cached_value_[this] = (ret);
+
+// DO NOT USE BACKSLASH
 
 /********************************/
 /*     Logger                   */
