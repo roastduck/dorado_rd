@@ -1,5 +1,4 @@
 #include <set>
-#include <map>
 #include <cmath>
 #include <vector>
 #include <string>
@@ -7,12 +6,39 @@
 #include <typeinfo>
 #include <exception>
 #include <algorithm>
+#include <unordered_map>
 #include "sdk.h"
 #include "const.h"
 #include "filter.h"
 #include "console.h"
 
 namespace rdai {
+
+/********************************/
+/*     Cacher                   */
+/********************************/
+
+#ifdef CACHE_BEGIN
+    #error CACHE_BEGIN defined
+#endif
+#ifdef CACHE_END
+    #error CACHE_END defined
+#endif
+
+#define CACHE_BEGIN(type) \
+    static std::unordered_map<const void*,type> cached_value_; \
+    static int cached_round_ = -1, cached_camp_ = -1; \
+    if (console->round() != cached_round_ || console->camp() != cached_camp_) \
+    { \
+        cached_round_ = console->round(); \
+        cached_camp_ = console->camp(); \
+        cached_value_.clear(); \
+    } \
+    if (cached_value_.count(this)) \
+        return cached_value_[this];
+
+#define CACHE_END(ret) \
+    return cached_value_[this] = (ret);
 
 /********************************/
 /*     Logger                   */
@@ -311,6 +337,9 @@ public:
 /********************************/
 
 // fake Conductor object
+#ifdef conductor
+    #error conductor defined
+#endif
 #define conductor (Conductor::get_instance())
 
 class Conductor
@@ -333,9 +362,9 @@ public:
     }
 
 private:
-    std::map<int, EUnit*> eUnitObj;
-    std::map<int, FUnit*> fUnitObj;
-    std::map<int, PUnit*> pUnits;
+    std::unordered_map<int, EUnit*> eUnitObj;
+    std::unordered_map<int, FUnit*> fUnitObj;
+    std::unordered_map<int, PUnit*> pUnits;
 
     std::vector<EGroup> eGroups;
     std::vector<FGroup> fGroups;
@@ -603,6 +632,7 @@ Unit<CampGroup, CampUnit>::~Unit()
 template <class CampGroup, class CampUnit>
 double Unit<CampGroup, CampUnit>::strength_factor() const
 {
+    CACHE_BEGIN(double);
     if (lowerCase(get_entity()->name) == "mine") return 0;
     
     double val(0), ava(0), tot(0);
@@ -630,11 +660,12 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
     }
     console->selectUnit(0);
 
-    return val * ava / tot;
+    CACHE_END(val * ava / tot);
 }
 
 double EUnit::value_factor() const
 {
+    CACHE_BEGIN(double);
     if (lowerCase(get_entity()->name) == "mine") return 0;
     
     double danger(0), hp(0), def(0);
@@ -663,7 +694,7 @@ double EUnit::value_factor() const
 
     console->selectUnit(0);
 
-    return danger / inf_1(hp * def / 5000);
+    CACHE_END(danger / inf_1(hp * def / 5000));
 }
 
 inline double EUnit::danger_factor() const
@@ -766,37 +797,41 @@ void EGroup::logMsg() const
 
 double EGroup::danger_factor() const
 {
+    CACHE_BEGIN(double);
     double ret(0);
     for (const EUnit *e : member)
         ret += e->danger_factor();
-    return inf_1(ret / 200);
+    CACHE_END(inf_1(ret / 200));
 }
 
 double FGroup::ability_factor() const
 {
+    CACHE_BEGIN(double);
     double ret(0);
     for (const FUnit *e : member)
         ret += e->ability_factor();
-    return inf_1(ret / 200);
+    CACHE_END(inf_1(ret / 200));
 }
 
 double FGroup::health_factor() const
 {
+    CACHE_BEGIN(double);
     double tc(0), tm(0);
     for (const FUnit *e : member)
     {
         tc += console->unitArg("hp","c",e->get_entity());
         tm += console->unitArg("hp","m",e->get_entity());
     }
-    return tc / tm;
+    CACHE_END(tc / tm);
 }
 
 double EGroup::value_factor() const
 {
+    CACHE_BEGIN(double);
     double ret(0);
     for (const EUnit *e : member)
         ret += e->value_factor();
-    return inf_1(ret / 200);
+    CACHE_END(inf_1(ret / 200));
 }
 
 double EGroup::mine_factor() const
@@ -845,6 +880,7 @@ bool FGroup::checkMine()
 
 bool FGroup::checkJoin()
 {
+    mylog << "GroupStatus : FGroup : Group " << groupId << " : health_factor() = " << health_factor() << std::endl;
     if (member.empty() || health_factor() < GOBACK_THRESHOLD) return false;
     FGroup *target = 0;
     for (FGroup &g : const_cast<std::vector<FGroup>&>(conductor.get_f_groups()))
@@ -1095,7 +1131,6 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 }
 
 #undef conductor
+#undef CACHE_BEGIN
+#undef CACHE_END
 
-/* OPTIMIZE NOTE:
- * all the factors can be cached (may use macros to wrap functions
- */
