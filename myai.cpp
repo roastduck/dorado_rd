@@ -1040,7 +1040,7 @@ void Conductor::check_upgrade_hero()
             if (! target || _cost < cost)
                 cost = _cost, target = item;
         }
-        if (cost < console->gold() - console->goldCostCurrentRound())
+        if (target && cost < console->gold() - console->goldCostCurrentRound())
             console->buyHeroLevel(target);
         else
             break;
