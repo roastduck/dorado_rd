@@ -65,6 +65,15 @@ inline T sqr(T x)
     return x*x;
 }
 
+inline Pos operator*(Pos A, double k)
+{
+    return Pos(A.x*k, A.y*k);
+}
+inline Pos operator*(double k, Pos A)
+{
+    return Pos(A.x*k, A.y*k);
+}
+
 struct PosCmp { bool operator()(const Pos &a, const Pos &b) const { return a.x < b.x || a.x == b.x && a.y < b.y; } };
 
 /********************************/
@@ -93,7 +102,8 @@ const double ISMINING_VALUE_RATE = 2.0;
 const double DANGER_FACTOR = 1.0;
 const double ABILITY_FACTOR = 1.0;
 
-const double MINE_MEMBER_THRESHOLD = 4;
+const double NEW_MINE_MEMBER_THRESHOLD = 4;
+const double CUR_MINE_MEMBER_THRESHOLD = 2;
 const double MINE_THRESHOLD = 0.2; // remember we have this
 const double MINE_DIS_FACTOR = 0.1;
 
@@ -334,7 +344,18 @@ public:
         : Group<FGroup, FUnit>(), curMinePos(-1, -1) {}
     
     FGroup(FGroup &&other)
-        : Group<FGroup, FUnit>((Group<FGroup,FUnit>&&)other), curMinePos(other.curMinePos) {}
+        : Group<FGroup, FUnit>((Group<FGroup,FUnit>&&)other), curMinePos(other.curMinePos)
+    {
+        other.curMinePos = Pos(-1, -1);
+    }
+    
+    FGroup &operator=(FGroup &&other)
+    {
+        Group<FGroup, FUnit>::operator=((Group<FGroup,FUnit>&&)other);
+        curMinePos = other.curMinePos;
+        other.curMinePos = Pos(-1, -1);
+        return *this;
+    }
 
     ~FGroup()
     {
@@ -557,7 +578,7 @@ void Master::move(const Pos &p)
         get_entity()->mp >= BLINK_MP && get_entity()->findSkill("blink")->cd == 0
        )
     {
-        Pos q(get_entity()->pos), _p(q+(p-q)*std::min(1, (int)(sqrt(BLINK_RANGE)/dis(p,q))));
+        Pos q(get_entity()->pos), _p(q+(p-q)*std::min(1.0, sqrt(BLINK_RANGE)/dis(p,q)));
         mylog << "UnitAction : Unit " << id << " : blink " << _p << std::endl;
         console->useSkill("blink", _p, get_entity());
     } else
@@ -976,16 +997,15 @@ bool FGroup::checkAttack()
 }
 
 bool FGroup::checkMine()
-{
-    if (member.size() < MINE_MEMBER_THRESHOLD)
-    {
-        releaseMine();
-        return false;
-    }
-    
+{   
     const EGroup *target = 0;
     if (curMinePos != Pos(-1, -1))
     {
+        if (member.size() < CUR_MINE_MEMBER_THRESHOLD)
+        {
+            releaseMine();
+            return false;
+        }
         UnitFilter filter;
         filter.setAreaFilter(new Circle(curMinePos, MINING_RANGE), "a");
         filter.setTypeFilter("mine");
@@ -996,13 +1016,21 @@ bool FGroup::checkMine()
             double new_factor = g.mine_factor() / g.danger_factor();
             new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * MINE_DIS_FACTOR));
             if (new_factor <= MINE_THRESHOLD * 0.8) // use <= because of 0
+            {
                 releaseMine();
+                mylog << "GroupAction : FGroup " << groupId << " : release mine. new_factor = " << new_factor << std::endl;
+            }
             else
                 target = &g;
         }
     }
     if (curMinePos == Pos(-1, -1))
     {
+        if (member.size() < NEW_MINE_MEMBER_THRESHOLD)
+        {
+            releaseMine();
+            return false;
+        }
         double cur_factor = 0.0;
         for (const EGroup &g : conductor.get_e_groups())
         {
@@ -1136,7 +1164,7 @@ bool FGroup::checkSearch()
     for (FUnit *u : member)
     {
         Pos p;
-        do p = outer.randPosInArea(); while (inner.contain(p));
+        do p = outer.randPosInArea(); while (inner.contain(p) || p.x <= 0 || p.y <= 0);
         u->move(p);
     }
     mylog << "GroupAction : Group " << groupId << " : search " << std::endl;
@@ -1331,11 +1359,12 @@ void Conductor::work()
     check_base_attack();
 
     UnitFilter filter;
-    filter.setAvoidFilter("militarybase");
-    filter.setAvoidFilter("observer");
+    filter.setAvoidFilter("militarybase", "a");
+    filter.setAvoidFilter("observer", "a");
     for (const PUnit *u : console->friendlyUnits(filter))
     {
         FUnit *obj = conductor.get_f_unit(u->id);
+        mylog << "UnitStatus : Unit " << u->id << " : name = " << u->name << std::endl;
         if (! obj->get_belongs())
         {
             fGroups.push_back(FGroup());
