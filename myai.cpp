@@ -1,6 +1,7 @@
 #include <set>
 #include <map>
 #include <cmath>
+#include <chrono>
 #include <vector>
 #include <string>
 #include <random>
@@ -16,6 +17,16 @@
 
 namespace rdai {
 
+/********************************/
+/*     RANDOM_SEED              */
+/********************************/
+
+#ifdef MY_RAND_SEED
+    const static unsigned seed = MY_RAND_SEED;
+#else
+    const static unsigned seed = std::chrono::system_clock::now().time_since_epoch().count();
+#endif
+    
 /********************************/
 /*     Cacher                   */
 /********************************/
@@ -413,7 +424,10 @@ private:
 
     Conductor()
         : map(0), info(0), cmd(0), hammerguardCnt(0), masterCnt(0), berserkerCnt(0), scouterCnt(0),
-          generator(0), alarm(false) {}
+          generator(seed), alarm(false)
+    {
+        mylog << "RandomSeed : " << seed << std::endl;
+    }
 
     // functions below return value in [0,1]
     double need_buy_hammerguard() const;
@@ -532,6 +546,7 @@ void Character::attack(const EGroup &target)
     if (! targetUnit)
         for (const EUnit *e : target.get_member())
         {
+            if (lowerCase(e->get_entity()->name) == "mine") continue;
             double _val = e->value_factor();
             if (_val > val)
                 val = _val, targetUnit = e;
@@ -557,6 +572,7 @@ void HammerGuard::attack(const EGroup &target)
         double val(-INFINITY);
         for (const EUnit *e : target.get_member())
         {
+            if (lowerCase(e->get_entity()->name) == "mine") continue;
             double _val = e->danger_factor();
             if (_val > val && dis2(get_entity()->pos, e->get_entity()->pos) <= HAMMERATTACK_RANGE)
                 val = _val, targetUnit = e;
@@ -603,6 +619,7 @@ void Berserker::attack(const EGroup &target)
         if (! targetUnit)
             for (const EUnit *e : target.get_member())
             {
+                if (lowerCase(e->get_entity()->name) == "mine") continue;
                 double _val = e->value_factor();
                 if (_val > val)
                     val = _val, targetUnit = e;
@@ -726,16 +743,16 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
 
     if (lowerCase(get_entity()->name) == "observer")
     {
-        ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR * OBSERVER_FACTOR_RATE;
+        ava += std::max(console->unitArg("hp","c"), 0) * HP_STRENGTH_FACTOR * OBSERVER_FACTOR_RATE;
         tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
         val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
     } else
     {
-        ava += console->unitArg("hp","c") * HP_STRENGTH_FACTOR;
+        ava += std::max(console->unitArg("hp","c"), 0) * HP_STRENGTH_FACTOR;
         tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
         if (get_entity()->isHero())
         {
-            ava += console->unitArg("mp","c") * MP_STRENGTH_FACTOR;
+            ava += std::max(console->unitArg("mp","c"), 0) * MP_STRENGTH_FACTOR;
             tot += console->unitArg("mp","m") * MP_STRENGTH_FACTOR;
         }
         val += console->unitArg("atk","c") * ATK_STRENGTH_FACTOR;
@@ -760,14 +777,14 @@ double EUnit::value_factor() const
     // may consider recover rate
     if (lowerCase(get_entity()->name) == "observer")
     {
-        hp += console->unitArg("hp","c") * HP_VALUE_FACTOR;
+        hp += std::max(console->unitArg("hp","c"), 0) * HP_VALUE_FACTOR;
         def += console->unitArg("def","c") * DEF_VALUE_FACTOR;
     } else
     {
-        hp += console->unitArg("hp","c") * HP_VALUE_FACTOR;
+        hp += std::max(console->unitArg("hp","c"), 0) * HP_VALUE_FACTOR;
         if (get_entity()->isHero())
         {
-            danger += console->unitArg("mp","c") * MP_VALUE_FACTOR;
+            danger += std::max(console->unitArg("mp","c"), 0) * MP_VALUE_FACTOR;
         }
         danger += console->unitArg("atk","c") * ATK_VALUE_FACTOR;
         def += console->unitArg("def","c") * DEF_VALUE_FACTOR;
@@ -794,7 +811,7 @@ inline double FUnit::ability_factor() const
 
 inline double FUnit::health_factor() const
 {
-    return (double)console->unitArg("hp","c",get_entity()) / console->unitArg("hp","m",get_entity());
+    return (double)std::max(console->unitArg("hp","c",get_entity()), 0) / console->unitArg("hp","m",get_entity());
 }
 
 EUnit::EUnit(int _id)
@@ -904,7 +921,7 @@ double FGroup::health_factor() const
     double tc(0), tm(0);
     for (const FUnit *e : member)
     {
-        tc += console->unitArg("hp","c",e->get_entity());
+        tc += std::max(console->unitArg("hp","c",e->get_entity()), 0);
         tm += console->unitArg("hp","m",e->get_entity());
     }
     CACHE_END(tc / tm);
@@ -916,18 +933,19 @@ double FGroup::surround_factor() const
     double fri(0), ene(0);
     std::set<int> flag;
     for (const FUnit *e : member)
-        fri += e->ability_factor();
-    UnitFilter filter;
-    filter.setAreaFilter
-        (new Circle(MILITARY_BASE_POS[console->camp()], LEVELUP_RANGE), "a");
-    filter.setAvoidFilter("mine");
-    for (const PUnit *u : console->enemyUnits(filter))
     {
-        const EGroup *g = conductor.get_e_unit(u->id)->get_belongs();
-        if (flag.count(g->groupId)) continue;
-        flag.insert(g->groupId);
-        for (const EUnit *e : g->get_member())
-            ene += e->danger_factor();
+        fri += e->ability_factor();
+        UnitFilter filter;
+        filter.setAreaFilter(new Circle(e->get_entity()->pos, e->get_entity()->view), "a");
+        filter.setAvoidFilter("mine");
+        for (const PUnit *u : console->enemyUnits(filter))
+        {
+            const EGroup *g = conductor.get_e_unit(u->id)->get_belongs();
+            if (flag.count(g->groupId)) continue;
+            flag.insert(g->groupId);
+            for (const EUnit *e : g->get_member())
+                ene += e->danger_factor();
+        }
     }
     CACHE_END(fri / ene);
 }
@@ -967,6 +985,7 @@ bool FGroup::checkGoback()
         health_factor() >= GOBACK_HEALTH_THRESHOLD &&
         surround_factor() >= GOBACK_SURROUND_THRESHOLD
        ) return false;
+    mylog << "GroupStatus : Group " << groupId << " : surround_factor = " << surround_factor() << std::endl;
     for (FUnit *u : member)
         u->move(MILITARY_BASE_POS[console->camp()]);
     mylog << "GroupAction : Group " << groupId << " : go back " << std::endl;
@@ -1092,6 +1111,8 @@ bool FGroup::checkJoin()
             dis2(g.center(), center()) <= JOIN_DIS2_THRESHOLD
            )
         {
+            mylog << "MapStatus : map_danger_factor at " << g.center() << " (g.center) is " << conductor.map_danger_factor(g.center()) << std::endl;
+            mylog << "MapStatus : map_danger_factor at " << center() << " (this->center) is " << conductor.map_danger_factor(center()) << std::endl;
             target = &g;
             break;
         }
@@ -1116,7 +1137,8 @@ bool FGroup::checkSplit()
         if (
             member.back()->health_factor() < GOBACK_HEALTH_THRESHOLD &&
             ! console->getBuff("winordie", member.back()->get_entity()) &&
-            ! console->getBuff("dizzy", member.back()->get_entity())
+            ! console->getBuff("dizzy", member.back()->get_entity()) ||
+            console->getBuff("reviving", member.back()->get_entity())
            )
         {
             newGroup.add_member(member.back());
@@ -1145,6 +1167,8 @@ bool FGroup::checkSupport()
             conductor.map_danger_factor(g.center()) > conductor.map_danger_factor(center())
            )
         {
+            mylog << "MapStatus : map_danger_factor at " << g.center() << " (g.center) is " << conductor.map_danger_factor(g.center()) << std::endl;
+            mylog << "MapStatus : map_danger_factor at " << center() << " (this->center) is " << conductor.map_danger_factor(center()) << std::endl;
             double _cur = g.surround_factor();
             if (_cur < SUPPORT_SURROUND_THRESHOLD && (_cur < cur || ! target))
                 target = &g, cur = _cur;
@@ -1400,6 +1424,8 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 {
     using namespace rdai;
     
+    auto startTime = std::chrono::system_clock::now();
+    
     console = new Console(map, info, cmd);
     
     mylog << "Round " << console->round() << std::endl;
@@ -1414,6 +1440,9 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 
     delete console;
     console = 0;
+    
+    auto endTime = std::chrono::system_clock::now();
+    mylog << "TimeConsumed : " << std::chrono::duration<double>(endTime - startTime).count() << "s" << std::endl;
 }
 
 #undef conductor
