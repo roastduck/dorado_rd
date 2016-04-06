@@ -94,7 +94,9 @@ struct PosCmp { bool operator()(const Pos &a, const Pos &b) const { return a.x <
 const double BUY_HERO_THRESHOLD = 0.4;
 
 const double HP_STRENGTH_FACTOR = 1.0;
+const double HP_RATE_STRENGTH_FACTOR = 2.0;
 const double MP_STRENGTH_FACTOR = 1.0;
+const double MP_RATE_STRENGTH_FACTOR = 0.2;
 const double ATK_STRENGTH_FACTOR = 1.0;
 const double DEF_STRENGTH_FACTOR = 0.7;
 const double SPEED_STRENGTH_FACTOR = 0.5;
@@ -438,6 +440,7 @@ private:
 
     void enemy_make_groups();
 
+    void check_alarm();
     void check_buy_hero();
     void check_buyback_hero();
     void check_callback_hero();
@@ -560,8 +563,42 @@ void Character::attack(const EGroup &target)
 
 void Character::move(const Pos &p)
 {
-    mylog << "UnitAction : Unit " << id << " : move " << p << std::endl;
-    console->move(p, get_entity());
+    const EUnit *targetUnit(0);
+    double val(-INFINITY);
+    if (get_entity()->findSkill("attack")->cd == 0)
+    {
+        UnitFilter filter;
+        filter.setAreaFilter(new Circle(get_entity()->pos, get_entity()->range), "a");
+        filter.setAvoidFilter("mine", "a");
+        filter.setAvoidFilter("observer", "a");
+        filter.setAvoidFilter("roshan", "a");
+        filter.setAvoidFilter("dragon", "a");
+        for (const PUnit *u : console->enemyUnits(filter))
+        {
+            const EUnit *e = conductor.get_e_unit(u->id);
+            double _val = e->value_factor();
+            if (_val > val)
+                val = _val, targetUnit = e;
+        }
+    }
+    if (targetUnit)
+    {
+        mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
+        console->attack(targetUnit->get_entity(), get_entity());
+    } else
+    {
+        Pos _p(p);
+        UnitFilter filter;
+        filter.setAreaFilter(new Circle(get_entity()->pos, get_entity()->view * 1.2), "a");
+        if (! console->enemyUnits(filter).empty())
+        {
+            Pos v1(conductor.get_f_unit(id)->get_belongs()->center() - get_entity()->pos), v2(p - get_entity()->pos);
+            if (dis2(v1, Pos(0,0)) > get_entity()->view && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) < cos(0.66 * pi))
+                _p = conductor.get_f_unit(id)->get_belongs()->center();
+        }
+        mylog << "UnitAction : Unit " << id << " : move " << _p << std::endl;
+        console->move(_p, get_entity());
+    }
 }
 
 void HammerGuard::attack(const EGroup &target)
@@ -589,12 +626,22 @@ void HammerGuard::attack(const EGroup &target)
 
 void Master::move(const Pos &p)
 {
-    if (
-        conductor.get_f_unit(id)->get_belongs()->get_member().size() == 1 && 
-        get_entity()->mp >= BLINK_MP && get_entity()->findSkill("blink")->cd == 0
-       )
+    Pos target(-1, -1);
+    if (get_entity()->mp >= BLINK_MP && get_entity()->findSkill("blink")->cd == 0)
     {
-        Pos q(get_entity()->pos), _p(q+(p-q)*std::min(1.0, sqrt(BLINK_RANGE)/dis(p,q)));
+        if (conductor.get_f_unit(id)->get_belongs()->get_member().size() == 1)
+            target = p;
+        else
+        {
+            Pos v1(get_entity()->pos - conductor.get_f_unit(id)->get_belongs()->center()),
+                v2(p - conductor.get_f_unit(id)->get_belongs()->center());
+            if (dis2(v1, Pos(0,0)) > 1.414 * BLINK_RANGE && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) < cos(0.66 * pi))
+                target = conductor.get_f_unit(id)->get_belongs()->center();
+        }
+    }
+    if (target != Pos(-1, -1))
+    {
+        Pos q(get_entity()->pos), _p(q+(target-q)*std::min(1.0, sqrt(BLINK_RANGE)/dis(target,q)));
         mylog << "UnitAction : Unit " << id << " : blink " << _p << std::endl;
         console->useSkill("blink", _p, get_entity());
     } else
@@ -750,10 +797,12 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
     {
         ava += std::max(console->unitArg("hp","c"), 0) * HP_STRENGTH_FACTOR;
         tot += console->unitArg("hp","m") * HP_STRENGTH_FACTOR;
+        val += console->unitArg("hp", "r") * HP_RATE_STRENGTH_FACTOR;
         if (get_entity()->isHero())
         {
             ava += std::max(console->unitArg("mp","c"), 0) * MP_STRENGTH_FACTOR;
             tot += console->unitArg("mp","m") * MP_STRENGTH_FACTOR;
+            val += console->unitArg("mp", "r") * MP_RATE_STRENGTH_FACTOR;
         }
         val += console->unitArg("atk","c") * ATK_STRENGTH_FACTOR;
         val += console->unitArg("def","c") * DEF_STRENGTH_FACTOR;
@@ -774,7 +823,6 @@ double EUnit::value_factor() const
 
     console->selectUnit(get_entity());
 
-    // may consider recover rate
     if (lowerCase(get_entity()->name) == "observer")
     {
         hp += std::max(console->unitArg("hp","c"), 0) * HP_VALUE_FACTOR;
@@ -1148,8 +1196,12 @@ bool FGroup::checkSplit()
             _member.push_back(member.back());
         member.pop_back();
     }
-    for (auto u : _member)
-        member.push_back(u);
+    member = std::move(_member);
+    if (member.empty())
+    {
+        *this = std::move(newGroup);
+        return false;
+    }
     if (newGroup.member.empty()) return false;
     mylog << "GroupAction : Group " << groupId << " : split " << std::endl;
     const_cast<std::vector<FGroup>&>(conductor.get_f_groups()).push_back(std::move(newGroup)); // keep this the last line
@@ -1256,7 +1308,7 @@ void Conductor::enemy_make_groups()
 {
     eGroups.clear();
     for (const PUnit *item : console->enemyUnits())
-        if (! get_e_unit(item->id)->get_belongs())
+        if (! console->getBuff("reviving", item) && ! get_e_unit(item->id)->get_belongs())
         {
             eGroups.push_back(EGroup());
             eGroups.back().add_adj_members_recur(get_e_unit(item->id));
@@ -1289,6 +1341,15 @@ void Conductor::delMining(const Pos &p)
 bool Conductor::isMining(const Pos &p) const
 {
     return mining.count(p);
+}
+
+void Conductor::check_alarm()
+{
+    UnitFilter filter;
+    filter.setAreaFilter(new Circle(MILITARY_BASE_POS[console->camp()], SEARCH_RANGE2), "a");
+    if (console->enemyUnits(filter).empty()) return;
+    mylog << "BaseStatus : ALARM !!!" << std::endl;
+    set_alarm();
 }
 
 void Conductor::check_buy_hero()
@@ -1376,6 +1437,7 @@ void Conductor::init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd)
 
 void Conductor::work()
 {
+    check_alarm();
     check_buy_hero();
     check_buyback_hero();
     check_callback_hero();
