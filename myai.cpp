@@ -124,6 +124,7 @@ const double NEW_MINE_MEMBER_THRESHOLD = 4;
 const double CUR_MINE_MEMBER_THRESHOLD = 2;
 const double MINE_THRESHOLD = 0.2; // remember we have this
 const double MINE_DIS_FACTOR = 0.1;
+const int ENEMY_MINE_ENERGY_THRESHOLD = 20;
 
 const int JOIN_DIS2_THRESHOLD = 225;
 const int ENEMY_JOIN_DIS2 = 169;
@@ -138,6 +139,15 @@ const int SEARCH_RANGE2 = 1225;
 const int ALARM_ROUND = 5;
 
 static Console *console = 0;
+
+/********************************/
+/*     Pathfinder               */
+/********************************/
+
+void findShortestPath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path);
+// in sdk
+
+void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path);
 
 /********************************/
 /*     Characters               */
@@ -356,6 +366,7 @@ class FGroup : public Group<FGroup, FUnit> // Friend Group
     bool checkGoback();
     bool checkAttackBase();
     bool checkProtectBase();
+    bool checkScouter();
     bool checkAttack();
     bool checkMine();
     bool checkSupport();
@@ -396,6 +407,7 @@ public:
     double surround_factor() const;
     
     bool has_type(const std::string &s) const;
+    bool in_battle() const;
 };
 
 /********************************/
@@ -729,8 +741,15 @@ void Scouter::move(const Pos &p)
             UnitFilter filterEnemy;
             filterEnemy.setAreaFilter(new Circle(mines.front()->pos, MINING_RANGE), "a");
             filterEnemy.setAvoidFilter("mine", "a");
+            filterEnemy.setAvoidFilter("observer", "a");
+            filterEnemy.setAvoidFilter("roshan", "a");
+            filterEnemy.setAvoidFilter("dragon", "a");
             filterEnemy.setHpFilter(1, 0x7fffffff);
-            if (! console->enemyUnits(filterEnemy).empty())
+            // the line below is different from Scouter::attack !!!
+            if (
+                ! console->enemyUnits(filterEnemy).empty() ||
+                ! console->unitArg("energy", "c", mines.front()) && dis2(mines.front()->pos, p) > MINING_RANGE * 1.414
+               )
             {
                 int cnt(0);
                 Pos _p;
@@ -771,6 +790,9 @@ void Scouter::attack(const EGroup &target)
             UnitFilter filterEnemy;
             filterEnemy.setAreaFilter(new Circle(mines.front()->pos, MINING_RANGE), "a");
             filterEnemy.setAvoidFilter("mine", "a");
+            filterEnemy.setAvoidFilter("observer", "a");
+            filterEnemy.setAvoidFilter("roshan", "a");
+            filterEnemy.setAvoidFilter("dragon", "a");
             filterEnemy.setHpFilter(1, 0x7fffffff);
             if (! console->enemyUnits(filterEnemy).empty())
             {
@@ -1072,6 +1094,14 @@ bool FGroup::has_type(const std::string &s) const
     return false;
 }
 
+bool FGroup::in_battle() const
+{
+    for (FUnit *u : member)
+       if (console->getBuff("beattacked", u->get_entity()))
+           return true;
+    return false;
+}
+
 double EGroup::value_factor() const
 {
     CACHE_BEGIN(double);
@@ -1086,8 +1116,16 @@ double EGroup::mine_factor() const
     for (const EUnit *_u : member)
     {
         const PUnit *p = _u->get_entity();
-        if (lowerCase(p->name) == "mine" && console->unitArg("energy", "c", p) > 0)
-            return 1.0;
+        if (lowerCase(p->name) != "mine") continue;
+        if (console->unitArg("energy", "c", p) > ENEMY_MINE_ENERGY_THRESHOLD ) return 1.0;
+        UnitFilter filter;
+        filter.setAvoidFilter("mine", "a");
+        filter.setAvoidFilter("observer", "a");
+        filter.setAreaFilter(new Circle(p->pos, MINING_RANGE * 1.414));
+        if (
+            console->unitArg("energy", "c", p) > 0 &&
+            (console->enemyUnits(filter).empty() || ! console->friendlyUnits(filter).empty())
+           ) return 1.0;
     }
     return 0.0;
 }
@@ -1108,8 +1146,10 @@ bool FGroup::checkGoback()
         surround_factor() >= GOBACK_SURROUND_THRESHOLD
        ) return false;
     mylog << "GroupStatus : Group " << groupId << " : surround_factor = " << surround_factor() << std::endl;
+    console->changeShortestPathFunc(findSafePath);
     for (FUnit *u : member)
         u->move(MILITARY_BASE_POS[console->camp()]);
+    console->changeShortestPathFunc(findShortestPath);
     mylog << "GroupAction : Group " << groupId << " : go back " << std::endl;
     return true;
 }
@@ -1170,6 +1210,28 @@ bool FGroup::checkProtectBase()
             u->attack(*(conductor.get_e_unit(enemy.front()->id)->get_belongs()));
     mylog << "GroupAction : Group " << groupId << " : protect base " << std::endl;
     return true;
+}
+
+bool FGroup::checkScouter()
+{
+    if (member.size() > 1) return false;
+    const FUnit *u = member.front();
+    if (! (lowerCase(u->get_entity()->name) == "scouter" &&
+           u->get_entity()->mp >= SET_OBSERVER_MP &&
+           u->get_entity()->findSkill("setobserver")->cd == 0
+          ))
+        return false;
+    // 如果未确定目标，寻找目标优先级：
+    //  1 周边有可见敌人或敌人位置记忆10回合（非野怪），且无我军的
+    //  2 不可见，且预测能量可能为零的
+    //  3 中间矿
+    // 往目标走（使用安全寻路）
+    // （会自动插眼）
+    // 满足以下条件之一则更换目标：
+    //  1 有不是野怪的敌人
+    //  2 有敌人且矿进入视野
+    // TODO
+    return false;
 }
 
 bool FGroup::checkAttack()
@@ -1308,10 +1370,16 @@ bool FGroup::checkSplit()
               << " : health_factor() = " << member.back()->health_factor()
               << " , hp = " << member.back()->get_entity()->hp << std::endl;
         if (
+            // wounded goes back
             member.back()->health_factor() < GOBACK_HEALTH_THRESHOLD &&
             ! console->getBuff("winordie", member.back()->get_entity()) &&
-            ! console->getBuff("dizzy", member.back()->get_entity()) ||
+            ! console->getBuff("dizzy", member.back()->get_entity())
+            || // deleted the died
             console->getBuff("reviving", member.back()->get_entity())
+            || // split out scouter
+            lowerCase(member.back()->get_entity()->name) == "scouter" &&
+            member.back()->get_entity()->mp >= SET_OBSERVER_MP &&
+            member.back()->get_entity()->findSkill("setobserver")->cd == 0
            )
         {
             newGroup.add_member(member.back());
@@ -1352,8 +1420,10 @@ bool FGroup::checkSupport()
         }
     if (! target) return false;
     Pos targetPos = target->center();
+    console->changeShortestPathFunc(findSafePath);
     for (FUnit *u : member)
         console->move(targetPos, u->get_entity());
+    console->changeShortestPathFunc(findShortestPath);
     mylog << "GroupAction : Group " << groupId << " : support Group " << target->groupId << std::endl;
     return true;
 }
@@ -1378,6 +1448,7 @@ void FGroup::action()
     if (checkGoback()) { releaseMine(); return; }
     if (checkAttackBase()) { releaseMine(); return; }
     if (checkProtectBase()) { releaseMine(); return; }
+    if (checkScouter()) return;
     if (checkMine()) return;
     if (checkSupport()) return;
     if (checkAttack()) return;
@@ -1597,6 +1668,17 @@ void Conductor::work()
     
     for (FGroup &g : fGroups)
         g.action();
+}
+
+/********************************/
+/*     Pathfinder Implement     */
+/********************************/
+
+void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path)
+{
+    // 将可见敌人以及记忆10回合的敌人位置周边225平方距离，但不在目标400平方距离内的，加入blocks
+    // 若找不到则fallback到原有pathfinder
+    // TODO
 }
 
 } // namespace rdai
