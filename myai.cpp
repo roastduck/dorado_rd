@@ -474,6 +474,11 @@ public:
     {
         return *cmd;
     }
+    
+    const int get_height(const Pos &p) const
+    {
+        return get_map().getHeight(p.x, p.y);
+    }
 
     EUnit *get_e_unit(int id)
     {
@@ -637,6 +642,7 @@ void HammerGuard::attack(const EGroup &target)
         for (const EUnit *e : target.get_member())
         {
             if (lowerCase(e->get_entity()->name) == "mine") continue;
+            if (lowerCase(e->get_entity()->name) == "militarybase") continue;
             if (console->getBuff("dizzy", e->get_entity())) continue;
             double _val = e->danger_factor();
             if (_val > val && dis2(get_entity()->pos, e->get_entity()->pos) <= HAMMERATTACK_RANGE)
@@ -729,8 +735,14 @@ void Scouter::move(const Pos &p)
                 int cnt(0);
                 Pos _p;
                 do
+                {
                     _p = console->randPosInArea(mines.front()->pos, MINING_RANGE), cnt++;
-                while (! Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p) && cnt<10);
+                    if (cnt > 10) break;
+                }
+                while (
+                       ! Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p) ||
+                       abs(conductor.get_height(_p) - conductor.get_height(get_entity()->pos)) > 1
+                      );
                 if (Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p))
                 {
                     mylog << "UnitAction : Unit " << id << " : set observer " << _p << std::endl;
@@ -765,8 +777,14 @@ void Scouter::attack(const EGroup &target)
                 int cnt(0);
                 Pos _p;
                 do
+                {
                     _p = console->randPosInArea(mines.front()->pos, MINING_RANGE), cnt++;
-                while (! Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p) && cnt<10);
+                    if (cnt > 10) break;
+                }
+                while (
+                       ! Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p) ||
+                       abs(conductor.get_height(_p) - conductor.get_height(get_entity()->pos)) > 1
+                      );
                 if (Circle(get_entity()->pos, SET_OBSERVER_RANGE).contain(_p))
                 {
                     mylog << "UnitAction : Unit " << id << " : set observer " << _p << std::endl;
