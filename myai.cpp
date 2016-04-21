@@ -120,7 +120,7 @@ const double CUR_ATTACK_BASE_THRESHOLD = 2;
 const double ALARM_NEW_ATTACK_BASE_THRESHOLD = 4;
 const double ALARM_CUR_ATTACK_BASE_THRESHOLD = 0;
 
-const double NEW_MINE_MEMBER_THRESHOLD = 4;
+const double NEW_MINE_MEMBER_THRESHOLD = 3;
 const double CUR_MINE_MEMBER_THRESHOLD = 2;
 const double MINE_THRESHOLD = 0.2; // remember we have this
 const double MINE_DIS_FACTOR = 0.1;
@@ -138,14 +138,13 @@ const int SEARCH_RANGE2 = 1225;
 
 const int ALARM_ROUND = 5;
 
+const int POS_MEM_ROUND = 10;
+
 static Console *console = 0;
 
 /********************************/
 /*     Pathfinder               */
 /********************************/
-
-void findShortestPath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path);
-// in sdk
 
 void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path);
 
@@ -223,18 +222,12 @@ protected:
     CampGroup *belongs;
     
 public:
-    int get_id() const
-    {
-        return id;
-    }
+    int get_id() const { return id; }
 
     PUnit *get_entity();
     const PUnit *get_entity() const;
 
-    const CampGroup *get_belongs() const
-    {
-        return belongs;
-    }
+    const CampGroup *get_belongs() const { return belongs; }
 
     Unit(int _id);
     Unit(const Unit<CampGroup, CampUnit> &) = delete;
@@ -260,15 +253,9 @@ public:
     
     ~Group();
 
-    bool idExist(int id) const
-    {
-        return idSet.count(id);
-    }
+    bool idExist(int id) const { return idSet.count(id); }
 
-    const std::vector<CampUnit*> &get_member() const
-    {
-        return member;
-    }
+    const std::vector<CampUnit*> &get_member() const { return member; }
 
     void add_member(CampUnit *unit);
 
@@ -358,15 +345,16 @@ public:
 
 class FGroup : public Group<FGroup, FUnit> // Friend Group
 {
-    Pos curMinePos;
+    Pos curMinePos, curScoutPos;
     bool attackBase;
 
     void releaseMine();
+    void releaseScout() { curScoutPos = Pos(-1, -1); }
 
     bool checkGoback();
     bool checkAttackBase();
     bool checkProtectBase();
-    bool checkScouter();
+    bool checkScout();
     bool checkAttack();
     bool checkMine();
     bool checkSupport();
@@ -374,28 +362,26 @@ class FGroup : public Group<FGroup, FUnit> // Friend Group
 
 public:
     FGroup()
-        : Group<FGroup, FUnit>(), curMinePos(-1, -1), attackBase(false) {}
+        : Group<FGroup, FUnit>(), curMinePos(-1, -1), curScoutPos(-1, -1), attackBase(false) {}
     
     FGroup(FGroup &&other)
         : Group<FGroup, FUnit>((Group<FGroup,FUnit>&&)other),
-          curMinePos(other.curMinePos), attackBase(other.attackBase)
-    {
-        other.curMinePos = Pos(-1, -1);
-    }
+          curMinePos(other.curMinePos), curScoutPos(other.curScoutPos), attackBase(other.attackBase)
+    { other.curMinePos = other.curScoutPos = Pos(-1, -1), other.attackBase = false; }
     
     FGroup &operator=(FGroup &&other)
     {
         Group<FGroup, FUnit>::operator=((Group<FGroup,FUnit>&&)other);
         curMinePos = other.curMinePos;
+        curScoutPos = other.curScoutPos;
         attackBase = other.attackBase;
         other.curMinePos = Pos(-1, -1);
+        other.curScoutPos = Pos(-1, -1);
+        other.attackBase = false;
         return *this;
     }
 
-    ~FGroup()
-    {
-        releaseMine();
-    }
+    ~FGroup() { releaseMine(), releaseScout(); }
 
     void action();
     
@@ -431,9 +417,11 @@ public:
     }
 
 private:
+    std::default_random_engine generator;
+    
     std::unordered_map<int, EUnit*> eUnitObj;
     std::unordered_map<int, FUnit*> fUnitObj;
-    std::unordered_map<int, PUnit*> pUnits;
+    std::unordered_map<int, std::pair<PUnit*, bool> > pUnits; // second = true means that is a copy
 
     std::vector<EGroup> eGroups;
     std::vector<FGroup> fGroups;
@@ -443,16 +431,19 @@ private:
     PCommand *cmd;
 
     int hammerguardCnt, masterCnt, berserkerCnt, scouterCnt;
-    std::default_random_engine generator;
     int alarm;
-
     std::map<Pos, int, PosCmp> mining;
+    std::map<Pos, int, PosCmp> mineEnergy;
+    std::map<int, std::pair<Pos, int /*round*/> > enemyPos;
 
     Conductor()
         : map(0), info(0), cmd(0), hammerguardCnt(0), masterCnt(0), berserkerCnt(0), scouterCnt(0),
           generator(seed), alarm(-1)
     {
         mylog << "RandomSeed : " << seed << std::endl;
+        
+        for (int i=0; i<MINE_NUM; i++)
+            mineEnergy[MINE_POS[i]] = (i ? 0 : MAX_ROUND + 5);
     }
 
     // functions below return value in [0,1]
@@ -462,6 +453,8 @@ private:
     double need_buy_scouter() const;
     double need_buy_hero() const;
 
+    void make_p_units();
+    void save_p_units();
     void enemy_make_groups();
 
     void check_alarm();
@@ -470,27 +463,19 @@ private:
     void check_callback_hero();
     void check_upgrade_hero();
     void check_base_attack();
+    
+    void update_energy();
+    void set_energy(const Pos &p, int energy) { mineEnergy[p] = energy; }
+    
+    void update_enemy_pos();
+    void set_enemy_pos(int id, const Pos &p) { enemyPos[id] = std::make_pair(p, console->round()); }
 
 public:
-    const PMap &get_map() const
-    {
-        return *map;
-    }
-
-    const PPlayerInfo &get_info() const
-    {
-        return *info;
-    }
-
-    const PCommand &get_cmd() const
-    {
-        return *cmd;
-    }
+    const PMap &get_map() const { return *map; }
+    const PPlayerInfo &get_info() const { return *info; }
+    const PCommand &get_cmd() const { return *cmd; }
     
-    const int get_height(const Pos &p) const
-    {
-        return get_map().getHeight(p.x, p.y);
-    }
+    const int get_height(const Pos &p) const { return get_map().getHeight(p.x, p.y); }
 
     EUnit *get_e_unit(int id)
     {
@@ -506,20 +491,9 @@ public:
         return fUnitObj[id];
     }
 
-    PUnit *get_p_unit(int id)
-    {
-        return pUnits[id];
-    }
-
-    const std::vector<EGroup> &get_e_groups() const
-    {
-        return eGroups;
-    }
-
-    const std::vector<FGroup> &get_f_groups() const
-    {
-        return fGroups;
-    }
+    PUnit *get_p_unit(int id) { return pUnits[id].first; }
+    const std::vector<EGroup> &get_e_groups() const { return eGroups; }
+    const std::vector<FGroup> &get_f_groups() const { return fGroups; }
     
     double map_danger_factor(const Pos &p) const;
 
@@ -529,23 +503,22 @@ public:
         return distribution(generator);
     }
 
-    void logMining() const;
-    void regMining(const Pos &p, int id);
-    void delMining(const Pos &p);
-    bool isMining(const Pos &p) const;
+    void log_mining() const;
+    void reg_mining(const Pos &p, int id);
+    void del_mining(const Pos &p);
+    bool is_mining(const Pos &p) const { return mining.count(p); }
     
-    void set_alarm()
-    {
-        alarm = console->round();
-    }
+    int get_energy(const Pos &p) const { return mineEnergy.at(p); }
     
-    bool alarmed() const
-    {
-        return ~alarm && console->round() - alarm <= ALARM_ROUND;
-    }
+    std::map<int, Pos> get_enemy_pos() const;
+    
+    void set_alarm() { alarm = console->round(); }
+    
+    bool alarmed() const { return ~alarm && console->round() - alarm <= ALARM_ROUND; }
 
     void init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd);
     void work();
+    void finish();
 } Conductor::instance[2];
 
 /********************************/
@@ -1134,7 +1107,7 @@ void FGroup::releaseMine()
 {
     if (curMinePos != Pos(-1, -1))
     {
-        conductor.delMining(curMinePos);
+        conductor.del_mining(curMinePos);
         curMinePos = Pos(-1, -1);
     }   
 }
@@ -1212,7 +1185,7 @@ bool FGroup::checkProtectBase()
     return true;
 }
 
-bool FGroup::checkScouter()
+bool FGroup::checkScout()
 {
     if (member.size() > 1) return false;
     const FUnit *u = member.front();
@@ -1228,10 +1201,66 @@ bool FGroup::checkScouter()
     // 往目标走（使用安全寻路）
     // （会自动插眼）
     // 满足以下条件之一则更换目标：
-    //  1 有不是野怪的敌人
-    //  2 有敌人且矿进入视野
-    // TODO
-    return false;
+    //  1 有野怪且进入视野
+    //  2 有敌人且矿进入插眼距离
+    Pos oldScoutPos = curScoutPos;
+    if (curScoutPos != Pos(-1, -1))
+    {
+        UnitFilter filter;
+        filter.setAreaFilter(new Circle(curScoutPos, MINING_RANGE*1.414), "a");
+        filter.setHpFilter(1, 0x7fffffff);
+        filter.setAvoidFilter("observer", "a");
+        filter.setAvoidFilter("mine", "a");
+        if (! console->enemyUnits(filter).empty() && dis2(curScoutPos, center()) < 64)
+            curScoutPos = Pos(-1, -1);
+        else
+        {
+            filter.setTypeFilter("roshan", "a");
+            filter.setTypeFilter("dragon", "a");
+            if (! console->enemyUnits(filter).empty() && dis2(curScoutPos, center()) < SCOUTER_VIEW)
+                curScoutPos = Pos(-1, -1);
+        }
+    }
+    if (curScoutPos == Pos(-1, -1))
+    {
+        std::vector<Pos> candidate;
+        for (int i=0; i<MINE_NUM; i++)
+        {
+            const Pos &p = MINE_POS[i];
+            if (p == oldScoutPos) continue;
+            bool ok(false);
+            for (const auto &x : conductor.get_enemy_pos())
+                if (dis2(conductor.get_p_unit(x.first)->pos, p) <= MINING_RANGE * 1.414)
+                {
+                    ok = true;
+                    break;
+                }
+            if (! ok) continue;
+            UnitFilter filter;
+            filter.setAreaFilter(new Circle(p, MINING_RANGE*1.414), "a");
+            filter.setHpFilter(1, 0x7fffffff);
+            if (! console->friendlyUnits(filter).empty()) continue;
+            candidate.push_back(p);
+        }
+        if (candidate.empty())
+            for (int i=0; i<MINE_NUM; i++)
+            {
+                const Pos &p = MINE_POS[i];
+                if (p == oldScoutPos) continue;
+                if (conductor.get_energy(p)) continue;
+                UnitFilter filter;
+                filter.setAreaFilter(new Circle(p, MINING_RANGE), "a");
+                filter.setTypeFilter("mine");
+                if (! console->enemyUnits(filter).empty()) continue;
+                candidate.push_back(p);
+            }
+        if (candidate.empty())
+            candidate.push_back(MINE_POS[0]);
+        curScoutPos = candidate[conductor.random(0, candidate.size() - 1)];
+    }
+    member.front()->move(curScoutPos);
+    mylog << "GroupAction : Group " << groupId << " : scout " << curScoutPos << std::endl;
+    return true;
 }
 
 bool FGroup::checkAttack()
@@ -1254,7 +1283,6 @@ bool FGroup::checkMine()
         UnitFilter filter;
         filter.setAreaFilter(new Circle(curMinePos, MINING_RANGE), "a");
         filter.setTypeFilter("mine");
-        filter.setHpFilter(1, 0x7fffffff);
         auto enemy = console->enemyUnits(filter);
         if (! enemy.empty())
         {
@@ -1287,31 +1315,17 @@ bool FGroup::checkMine()
                     _minePos = u->get_entity()->pos;
                     break;
                 }
-            if (! conductor.isMining(_minePos) && new_factor > MINE_THRESHOLD && new_factor > cur_factor)
+            if (! conductor.is_mining(_minePos) && new_factor > MINE_THRESHOLD && new_factor > cur_factor)
                 cur_factor = new_factor, target = &g, curMinePos = _minePos;
         }
     }
     if (curMinePos == Pos(-1, -1))
+        curMinePos = MINE_POS[0];
+    if (curMinePos != MINE_POS[0])
     {
-        std::vector<Pos> candidate;
-        for (int i=0; i<MINE_NUM; i++)
-        {
-            UnitFilter filter;
-            filter.setAreaFilter(new Circle(MINE_POS[i], MINING_RANGE), "a");
-            filter.setTypeFilter("mine");
-            filter.setHpFilter(1, 0x7fffffff);
-            if (! console->enemyUnits(filter).empty()) continue; // check visibility
-            if (conductor.isMining(MINE_POS[i])) continue;
-            candidate.push_back(MINE_POS[i]);
-        }
-        if (candidate.empty()) return false;
-        curMinePos = candidate[conductor.random(0, candidate.size()-1)];
-        if (curMinePos != MINE_POS[0] && std::find(candidate.begin(), candidate.end(), MINE_POS[0]) != candidate.end())
-        {
-            Pos v1(center() - MINE_POS[0]), v2(curMinePos - MINE_POS[0]);
-            if (dis2(v1, Pos(0,0)) > 1.414 * MINING_RANGE && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) < cos(0.66 * pi))
-                curMinePos = MINE_POS[0];
-        }
+        Pos v1(center() - MINE_POS[0]), v2(curMinePos - MINE_POS[0]);
+        if (dis2(v1, Pos(0,0)) > 1.414 * MINING_RANGE && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) < cos(0.66 * pi))
+            curMinePos = MINE_POS[0];
     }
     
     if (target)
@@ -1327,7 +1341,7 @@ bool FGroup::checkMine()
     } else
         return false;
     
-    conductor.regMining(curMinePos, groupId);
+    conductor.reg_mining(curMinePos, groupId);
     return true;
 }
 
@@ -1339,7 +1353,8 @@ bool FGroup::checkJoin()
     for (FGroup &g : const_cast<std::vector<FGroup>&>(conductor.get_f_groups()))
         if (
             ! g.member.empty() && g.groupId != groupId &&
-            (g.health_factor() >= GOBACK_HEALTH_THRESHOLD || ! attackBase && curMinePos == Pos(-1, -1)) &&
+            g.curScoutPos == Pos(-1, -1) &&
+            (g.health_factor() >= GOBACK_HEALTH_THRESHOLD || ! attackBase && curMinePos == Pos(-1, -1) && curScoutPos == Pos(-1, -1)) &&
             conductor.map_danger_factor(g.center()) > conductor.map_danger_factor(center()) &&
             dis2(g.center(), center()) <= JOIN_DIS2_THRESHOLD
            )
@@ -1354,7 +1369,7 @@ bool FGroup::checkJoin()
         target->add_member(u);
     member.clear(), idSet.clear();
     if (curMinePos != Pos(-1, -1) && target->curMinePos == Pos(-1, -1))
-        conductor.regMining(curMinePos, target->groupId);
+        conductor.reg_mining(curMinePos, target->groupId);
     mylog << "GroupAction : Group " << groupId << " : join Group " << target->groupId << std::endl;
     return true;
 }
@@ -1445,10 +1460,10 @@ bool FGroup::checkSearch()
 void FGroup::action()
 {
     logMsg();
-    if (checkGoback()) { releaseMine(); return; }
-    if (checkAttackBase()) { releaseMine(); return; }
-    if (checkProtectBase()) { releaseMine(); return; }
-    if (checkScouter()) return;
+    if (checkGoback()) { releaseMine(), releaseScout(); return; }
+    if (checkAttackBase()) { releaseMine(), releaseScout(); return; }
+    if (checkProtectBase()) { releaseMine(), releaseScout(); return; }
+    if (checkScout()) { releaseMine(); return; }
     if (checkMine()) return;
     if (checkSupport()) return;
     if (checkAttack()) return;
@@ -1505,7 +1520,7 @@ void Conductor::enemy_make_groups()
         }
 }
 
-void Conductor::logMining() const
+void Conductor::log_mining() const
 {
     mylog << "MineStatus : { ";
     for (auto i=mining.begin(); i!=mining.end(); i++)
@@ -1513,23 +1528,50 @@ void Conductor::logMining() const
     mylog << "}" << std::endl;
 }
 
-void Conductor::regMining(const Pos &p, int id)
+void Conductor::reg_mining(const Pos &p, int id)
 {
     mylog << "MineStatus : Position " << p << " required by FGroup " << id << std::endl;
     mining[p] = id;
-    logMining();
+    log_mining();
 }
 
-void Conductor::delMining(const Pos &p)
+void Conductor::del_mining(const Pos &p)
 {
     mylog << "MineStatus : Position " << p << " dropped " << std::endl;
     mining.erase(p);
-    logMining();
+    log_mining();
 }
 
-bool Conductor::isMining(const Pos &p) const
+void Conductor::update_energy()
 {
-    return mining.count(p);
+    for (int i=0; i<MINE_NUM; i++)
+        set_energy(MINE_POS[i], std::max(0, get_energy(MINE_POS[i]) - 1));
+    UnitFilter filter;
+    filter.setTypeFilter("mine", "a");
+    for (PUnit *p : console->enemyUnits(filter))
+        set_energy(p->pos, console->unitArg("energy", "c", p));
+}
+
+void Conductor::update_enemy_pos()
+{
+    UnitFilter filter;
+    filter.setAvoidFilter("militarybase", "a");
+    filter.setAvoidFilter("mine", "a");
+    filter.setHpFilter(1, 0x7fffffff);
+    for (PUnit *p : console->enemyUnits(filter))
+    {
+        if (console->getBuff("reviving", p)) continue;
+        set_enemy_pos(p->id, p->pos);
+    }
+}
+
+std::map<int, Pos> Conductor::get_enemy_pos() const
+{
+    std::map<int, Pos> ret;
+    for (auto i=enemyPos.begin(); i!=enemyPos.end(); i++)
+        if (i->second.second >= console->round() - POS_MEM_ROUND)
+            ret[i->first] = i->second.first;
+    return ret;
 }
 
 void Conductor::check_alarm()
@@ -1618,14 +1660,29 @@ void Conductor::check_base_attack()
         console->baseAttack(target);
 }
 
+void Conductor::make_p_units()
+{
+    for (const auto &u : info->units)
+    {
+        if (pUnits.count(u.id) && pUnits[u.id].second)
+            delete pUnits[u.id].first;
+        pUnits[u.id] = std::make_pair(const_cast<PUnit*>(&u), false);
+    }
+}
+
+void Conductor::save_p_units()
+{
+    for (auto i=pUnits.begin(); i!=pUnits.end(); i++)
+        i->second = std::make_pair(new PUnit(*(i->second.first)), true);
+}
+
 void Conductor::init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd)
 {
     map = &_map, info = &_info, cmd = &_cmd;
-    pUnits.clear();
-    for (const auto &u : info->units)
-        pUnits[u.id] = const_cast<PUnit*>(&u);
-    
+    make_p_units();
     enemy_make_groups();
+    update_energy();
+    update_enemy_pos();
 }
 
 void Conductor::work()
@@ -1670,6 +1727,11 @@ void Conductor::work()
         g.action();
 }
 
+void Conductor::finish()
+{
+    save_p_units();
+}
+
 /********************************/
 /*     Pathfinder Implement     */
 /********************************/
@@ -1678,7 +1740,20 @@ void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &
 {
     // 将可见敌人以及记忆10回合的敌人位置周边225平方距离，但不在目标400平方距离内的，加入blocks
     // 若找不到则fallback到原有pathfinder
-    // TODO
+    std::vector<Pos> newBlocks = blocks;
+    for (const auto &unit : conductor.get_enemy_pos())
+        if (lowerCase(conductor.get_p_unit(unit.first)->name) != "observer")
+            for (int i=-15; i<=15; i++)
+                for (int j=-15+std::abs(i); j<=15-std::abs(i); j++)
+                {
+                    Pos _p(unit.second + Pos(i, j));
+                    if (_p.x < 0 || _p.y < 0 || _p.x >= MAP_SIZE || _p.y >= MAP_SIZE) continue;
+                    if (dis2(_p, dest) <= 400) continue;
+                    newBlocks.push_back(_p);
+                }
+    findShortestPath(map, start, dest, newBlocks, _path);
+    if (dis2(_path.back(), dest) >= 16)
+        findShortestPath(map, start, dest, blocks, _path);
 }
 
 } // namespace rdai
@@ -1692,17 +1767,15 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
     using namespace rdai;
     
     auto startTime = std::chrono::system_clock::now();
-    
     console = new Console(map, info, cmd);
-    
     srand(conductor.random(0, 0xffffffff));
-    
     mylog << "Round " << console->round() << std::endl;
 
     try
     {
         conductor.init(map, info, cmd);
         conductor.work();
+        conductor.finish();
     } catch (const std::exception &e)
     {
         mylog << "Caught an error !!!!" << std::endl;
