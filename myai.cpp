@@ -133,7 +133,7 @@ const double NEW_MINE_MEMBER_THRESHOLD = 3;
 const double CUR_MINE_MEMBER_THRESHOLD = 2;
 const double MINE_THRESHOLD = 0.2; // remember we have this
 const double MINE_DIS_FACTOR = 0.1;
-const int ENEMY_MINE_ENERGY_THRESHOLD = 20;
+const int ENEMY_MINE_ENERGY_THRESHOLD = 35;
 
 const int JOIN_DIS2_THRESHOLD = 225;
 const int ENEMY_JOIN_DIS2 = 169;
@@ -144,6 +144,7 @@ const double GOBACK_SURROUND_THRESHOLD = 0.3;
 const double SUPPORT_SURROUND_THRESHOLD = 1.2;
 
 const int SEARCH_RANGE2 = 1225;
+const int ALARM_RANGE2 = 2209;
 
 const int ALARM_ROUND = 5;
 
@@ -243,7 +244,7 @@ public:
     Unit<CampGroup, CampUnit> &operator=(const Unit<CampGroup, CampUnit> &) = delete;
     Unit(Unit<CampGroup, CampUnit> &&) = delete;
     Unit<CampGroup, CampUnit> &operator=(Unit<CampGroup, CampUnit> &&) = delete;
-    ~Unit();
+    ~Unit() { delete character; } // will not be called until end
     
     double strength_factor() const;
 };
@@ -338,7 +339,7 @@ public:
     double ability_factor() const { return strength_factor() * ABILITY_FACTOR; }
     double health_factor() const;
     
-    EUnit *last_attack_by() const;
+    const EUnit *last_attack_by() const;
 };
 
 class EGroup : public Group<EGroup, EUnit> // Enemy Group
@@ -422,10 +423,7 @@ class Conductor
     static Conductor instance[2];
 
 public:
-    static Conductor &get_instance()
-    {
-        return instance[console->camp()];
-    }
+    static Conductor &get_instance() { return instance[console->camp()]; }
 
 private:
     std::default_random_engine generator;
@@ -453,7 +451,7 @@ private:
         mylog << "RandomSeed : " << seed << std::endl;
         
         for (int i=0; i<MINE_NUM; i++)
-            mineEnergy[MINE_POS[i]] = (i ? 0 : MAX_ROUND + 5);
+            mineEnergy[MINE_POS[i]] = (i ? 0 : MAX_ROUND * 2);
     }
 
     // functions below return value in [0,1]
@@ -857,12 +855,6 @@ inline const PUnit *Unit<CampGroup, CampUnit>::get_entity() const
 }
 
 template <class CampGroup, class CampUnit>
-Unit<CampGroup, CampUnit>::~Unit()
-{
-    delete character;
-}
-
-template <class CampGroup, class CampUnit>
 double Unit<CampGroup, CampUnit>::strength_factor() const
 {
     CACHE_BEGIN(double);
@@ -940,21 +932,31 @@ double FUnit::health_factor() const
     return (double)std::max(console->unitArg("hp","c",get_entity()), 0) / console->unitArg("hp","m",get_entity());
 }
 
-EUnit *FUnit::last_attack_by() const
+const EUnit *FUnit::last_attack_by() const
 {
-    if (! (*get_entity())["lasthit"]) return NULL;
-    int id(-1), round(-1);
+    CACHE_BEGIN(const EUnit*);
+    if (! (*get_entity())["lasthit"])
+    {
+        mylog << "WARNING : FUnit " << id << " : no arg lasthit" << std::endl;
+        CACHE_END(NULL);
+    }
+    int eid(-1), round(-1);
     const std::vector<int> &data = (*get_entity())["lasthit"]->val;
     for (const auto &x : conductor.get_enemy_pos())
     {
-        int _id = x.first;
-        assert(_id >= 0);
-        int _round = (data.size() > _id ? data.at(_id) : -1);
+        int _eid = x.first;
+        assert(_eid >= 0);
+        int _round = (data.size() > _eid ? data.at(_eid) : -1);
         if (_round > round)
-            round = _round, id = _id;
+            round = _round, eid = _eid;
     }
-    if (!~id) return NULL;
-    return conductor.get_e_unit(id);
+    if (!~eid)
+    {
+        mylog << "WARNING : FUnit " << id << " : no recorded attack" << std::endl;
+        CACHE_END(NULL);
+    }
+    mylog << "UnitStatus : Unit " << id << " : last attacked by unit " << eid << std::endl;
+    CACHE_END(conductor.get_e_unit(eid));
 }
 
 EUnit::EUnit(int _id)
@@ -1097,18 +1099,23 @@ double FGroup::surround_factor() const
 
 bool FGroup::has_type(const std::string &s) const
 {
+    CACHE_BEGIN(bool);
     for (FUnit *u : member)
-        if (lowerCase(u->get_entity()->name) == s)
-            return true;
-    return false;
+        if (lowerCase(u->get_entity()->name) == s) { CACHE_END(true); } // use {} to protect macro
+    CACHE_END(false);
 }
 
 const EGroup *FGroup::in_battle() const
 {
+    CACHE_BEGIN(const EGroup*);
     for (FUnit *u : member)
        if (console->getBuff("beattacked", u->get_entity()))
-           return u->last_attack_by()->get_belongs();
-    return NULL;
+       {
+           const EUnit *e = u->last_attack_by();
+           // hitting by base will not be recorded
+           if (e) { CACHE_END(e->get_belongs()); } // use {} to protect macro
+       }
+    CACHE_END(NULL);
 }
 
 double EGroup::value_factor() const
@@ -1122,6 +1129,7 @@ double EGroup::value_factor() const
 
 double EGroup::mine_factor() const
 {
+    CACHE_BEGIN(double);
     for (const EUnit *_u : member)
     {
         const PUnit *p = _u->get_entity();
@@ -1134,9 +1142,9 @@ double EGroup::mine_factor() const
         if (
             console->unitArg("energy", "c", p) > 0 &&
             (console->enemyUnits(filter).empty() || ! console->friendlyUnits(filter).empty())
-           ) return 1.0;
+           ) { CACHE_END(1.0); } // use {} to protect macro
     }
-    return 0.0;
+    CACHE_END(0.0);
 }
 
 void FGroup::releaseMine()
@@ -1167,12 +1175,18 @@ bool FGroup::checkAttackBase()
 {
     if (
         ! conductor.alarmed() &&
-        (attackBase && member.size() < CUR_ATTACK_BASE_THRESHOLD || ! attackBase && member.size() < NEW_ATTACK_BASE_THRESHOLD)
+        (
+         attackBase && member.size() < CUR_ATTACK_BASE_THRESHOLD ||
+         ! attackBase && member.size() < NEW_ATTACK_BASE_THRESHOLD
+        )
        ) return attackBase = false;
     if (
         conductor.alarmed() &&
-        dis2(center(), MILITARY_BASE_POS[1-console->camp()]) < dis2(center(), MILITARY_BASE_POS[console->camp()]) &&
-        (attackBase && member.size() < ALARM_CUR_ATTACK_BASE_THRESHOLD || ! attackBase && member.size() < ALARM_NEW_ATTACK_BASE_THRESHOLD)
+        (
+         dis2(center(), MILITARY_BASE_POS[1-console->camp()]) >= dis2(center(), MILITARY_BASE_POS[console->camp()]) ||
+         attackBase && member.size() < ALARM_CUR_ATTACK_BASE_THRESHOLD ||
+         ! attackBase && member.size() < ALARM_NEW_ATTACK_BASE_THRESHOLD
+        )
        ) return attackBase = false;
     attackBase = true;
     const EGroup *target(0);
@@ -1390,7 +1404,8 @@ bool FGroup::checkJoin()
         if (
             ! g.member.empty() && g.groupId != groupId &&
             g.curScoutPos == Pos(-1, -1) &&
-            (g.health_factor() >= GOBACK_HEALTH_THRESHOLD || ! attackBase && curMinePos == Pos(-1, -1) && curScoutPos == Pos(-1, -1)) &&
+            g.health_factor() >= GOBACK_HEALTH_THRESHOLD &&
+            //(g.health_factor() >= GOBACK_HEALTH_THRESHOLD || ! attackBase && curMinePos == Pos(-1, -1) && curScoutPos == Pos(-1, -1)) &&
             conductor.map_danger_factor(g.center()) > conductor.map_danger_factor(center()) &&
             dis2(g.center(), center()) <= JOIN_DIS2_THRESHOLD
            )
@@ -1428,6 +1443,7 @@ bool FGroup::checkSplit()
             || // deleted the died
             console->getBuff("reviving", member.back()->get_entity())
             || // split out scouter
+            ! in_battle() && ! attackBase &&
             lowerCase(member.back()->get_entity()->name) == "scouter" &&
             member.back()->get_entity()->mp >= SET_OBSERVER_MP &&
             member.back()->get_entity()->findSkill("setobserver")->cd == 0
@@ -1470,12 +1486,20 @@ bool FGroup::checkSupport()
                 target = &g, cur = _cur;
         }
     if (! target) return false;
-    Pos targetPos = target->center();
-    console->changeShortestPathFunc(findSafePath);
-    for (FUnit *u : member)
-        console->move(targetPos, u->get_entity());
-    console->changeShortestPathFunc(findShortestPath);
     mylog << "GroupAction : Group " << groupId << " : support Group " << target->groupId << std::endl;
+    Pos targetPos = target->center();
+    const EGroup *targetEnemy = target->in_battle();
+    if (targetEnemy && dis2(center(), targetPos) < 225)
+    {
+        for (FUnit *u : member)
+            u->attack(*targetEnemy);
+    } else
+    {
+        console->changeShortestPathFunc(findSafePath);
+        for (FUnit *u : member)
+            u->move(targetPos);
+        console->changeShortestPathFunc(findShortestPath);
+    }
     return true;
 }
 
@@ -1613,7 +1637,7 @@ std::map<int, Pos> Conductor::get_enemy_pos() const
 void Conductor::check_alarm()
 {
     UnitFilter filter;
-    filter.setAreaFilter(new Circle(MILITARY_BASE_POS[console->camp()], SEARCH_RANGE2), "a");
+    filter.setAreaFilter(new Circle(MILITARY_BASE_POS[console->camp()], ALARM_RANGE2), "a");
     filter.setHpFilter(1, 0x7fffffff);
     if (console->enemyUnits(filter).empty()) return;
     mylog << "BaseStatus : ALARM !!!" << std::endl;
@@ -1806,6 +1830,7 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
     console = new Console(map, info, cmd);
     srand(conductor.random(0, 0xffffffff));
     mylog << "Round " << console->round() << std::endl;
+    mylog << "Camp " << console->camp() << std::endl;
 
     try
     {
