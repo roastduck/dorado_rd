@@ -16,7 +16,9 @@
 #include "filter.h"
 #include "console.h"
 
-namespace rdai {
+#define RD_NAMESPACE rdai_ver9
+
+namespace RD_NAMESPACE {
 
 /********************************/
 /*     ASSERT                   */
@@ -150,7 +152,7 @@ const int ALARM_RANGE2 = 2209;
 
 const int ALARM_ROUND = 5;
 
-const int POS_MEM_ROUND = 10;
+const int POS_MEM_ROUND = 25;
 
 static Console *console = 0;
 
@@ -301,6 +303,8 @@ public:
         return Pos(ret.x / member.size(), ret.y / member.size());
     }
 
+    bool has_type(const std::string &s) const;
+    
     void logMsg() const;
 };
 
@@ -354,6 +358,8 @@ public:
     double danger_factor() const;
     double value_factor() const;
     double mine_factor() const;
+    
+    bool has_player() const { return has_type("hammerguard") || has_type("master") || has_type("berserker") || has_type("scouter"); }
     
     void logMsg() const;
 };
@@ -409,7 +415,6 @@ public:
     double health_factor() const;
     double surround_factor() const;
     
-    bool has_type(const std::string &s) const;
     const EGroup *in_battle() const;
 };
 
@@ -559,6 +564,7 @@ void Character::attack(const EGroup &target)
         {
             if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
             if (lowerCase(e->get_entity()->name) == "observer" || lowerCase(e->get_entity()->name) == "mine") continue;
+            if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
             double _val = e->value_factor();
             if (_val > val)
                 val = _val, targetUnit = e;
@@ -567,6 +573,7 @@ void Character::attack(const EGroup &target)
         for (const EUnit *e : target.get_member())
         {
             if (lowerCase(e->get_entity()->name) == "mine") continue;
+            if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
             double _val = e->value_factor();
             if (_val > val)
                 val = _val, targetUnit = e;
@@ -667,6 +674,7 @@ void HammerGuard::attack(const EGroup &target)
             if (lowerCase(e->get_entity()->name) == "militarybase") continue;
             if (lowerCase(e->get_entity()->name) == "observer") continue;
             if (console->getBuff("dizzy", e->get_entity())) continue;
+            if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
             double _val = e->danger_factor();
             if (_val > val && dis2(get_entity()->pos, e->get_entity()->pos) <= HAMMERATTACK_RANGE)
                 val = _val, targetUnit = e;
@@ -725,6 +733,7 @@ void Berserker::attack(const EGroup &target)
             {
                 if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
                 if (lowerCase(e->get_entity()->name) == "observer" || lowerCase(e->get_entity()->name) == "mine") continue;
+                if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
                 double _val = e->value_factor();
                 if (_val > val)
                     val = _val, targetUnit = e;
@@ -733,6 +742,7 @@ void Berserker::attack(const EGroup &target)
             for (const EUnit *e : target.get_member())
             {
                 if (lowerCase(e->get_entity()->name) == "mine") continue;
+                if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
                 double _val = e->value_factor();
                 if (_val > val)
                     val = _val, targetUnit = e;
@@ -1006,7 +1016,10 @@ void FUnit::move(const Pos &p)
         return;
     }
     
-    character->move(p);
+    if (conductor.mine_visible(p) && console->getBuff("ismining", get_entity()))
+        mine(*(conductor.mine_visible(p)));
+    else
+        character->move(p);
     
     madeAction = console->round();
 }
@@ -1057,6 +1070,14 @@ void EGroup::add_adj_members_recur(EUnit *unit)
     for (const PUnit *item : console->enemyUnits(filter))
         if (! console->getBuff("reviving", item) && ! idExist(item->id))
             add_adj_members_recur(conductor.get_e_unit(item->id));
+}
+
+template <class CampGroup, class CampUnit>
+bool Group<CampGroup, CampUnit>::has_type(const std::string &s) const
+{
+    for (CampUnit *u : member)
+        if (lowerCase(u->get_entity()->name) == s) return true;
+    return false;
 }
 
 template <class CampGroup, class CampUnit>
@@ -1127,13 +1148,6 @@ double FGroup::surround_factor() const
         }
     }
     CACHE_END(fri / ene);
-}
-
-bool FGroup::has_type(const std::string &s) const
-{
-    for (FUnit *u : member)
-        if (lowerCase(u->get_entity()->name) == s) return true;
-    return false;
 }
 
 const EGroup *FGroup::in_battle() const
@@ -1285,9 +1299,8 @@ bool FGroup::checkScout()
         return false;
     }
     // 如果未确定目标，寻找目标优先级：
-    //  1 周边有可见敌人或敌人位置记忆10回合（非野怪），且无我军的
+    //  1 周边有可见敌人或敌人位置记忆x回合（非野怪）至少一人至多三人，且无我军的
     //  2 不可见，且预测能量可能为零的
-    //  3 中间矿
     // 往目标走（使用安全寻路）
     // （会自动插眼）
     // 满足以下条件之一则更换目标：
@@ -1318,14 +1331,12 @@ bool FGroup::checkScout()
         {
             const Pos &p = MINE_POS[i];
             if (p == oldScoutPos) continue;
-            bool ok(false);
+            int enemyCnt = 0;
             for (const auto &x : conductor.get_enemy_pos())
-                if (dis2(conductor.get_p_unit(x.first)->pos, p) <= MINING_RANGE * 4)
-                {
-                    ok = true;
-                    break;
-                }
-            if (! ok) continue;
+                if (dis2(conductor.get_p_unit(x.first)->pos, p) <= MINING_RANGE * 16)
+                    enemyCnt ++;
+            mylog << "GroupAction : FGroup " << groupId << " : mine " << p << " : enemyCnt = " << enemyCnt << std::endl;
+            if (enemyCnt < 1 && enemyCnt > 3) continue;
             UnitFilter filter;
             filter.setAreaFilter(new Circle(p, MINING_RANGE*4), "a");
             filter.setHpFilter(1, 0x7fffffff);
@@ -1340,7 +1351,7 @@ bool FGroup::checkScout()
                 candidate.push_back(p);
             }
         if (candidate.empty())
-            candidate.push_back(MINE_POS[0]);
+            return false;
         curScoutPos = candidate[conductor.random(0, candidate.size() - 1)];
     }
     member.front()->move(curScoutPos);
@@ -1368,6 +1379,7 @@ bool FGroup::checkMine()
         const EGroup &g = *(conductor.mine_visible(curMinePos));
         double new_factor = g.mine_factor() / g.danger_factor();
         new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * MINE_DIS_FACTOR));
+        if (std::isnan(new_factor)) new_factor = 0;
         mylog << "GroupAction : FGroup " << groupId << " : check mine. new_factor = " << new_factor << std::endl;
         if (new_factor <= MINE_THRESHOLD * 0.8) // use <= because of 0
             releaseMine();
@@ -1381,6 +1393,7 @@ bool FGroup::checkMine()
         {
             double new_factor = g.mine_factor() / g.danger_factor();
             new_factor = inf_1(new_factor / inf_1(dis2(center(), g.center()) * MINE_DIS_FACTOR));
+            if (std::isnan(new_factor)) new_factor = 0;
             Pos _minePos;
             for (const EUnit *u : g.get_member())
                 if (lowerCase(u->get_entity()->name) == "mine")
@@ -1394,13 +1407,46 @@ bool FGroup::checkMine()
         if (nextMinePos == Pos(-1, -1))
         {
             for (int i=0; i<MINE_NUM; i++)
+            {
+                const Pos &p = MINE_POS[i];
                 if (
-                    ! conductor.mine_visible(MINE_POS[i]) &&
-                    ! conductor.is_mining(MINE_POS[i]) &&
-                    conductor.get_energy(MINE_POS[i]) >= ENEMY_MINE_ENERGY_THRESHOLD &&
+                    ! conductor.mine_visible(p) &&
+                    ! conductor.is_mining(p) &&
+                    conductor.get_energy(p) >= ENEMY_MINE_ENERGY_THRESHOLD &&
                     (nextMinePos == Pos(-1, -1) || dis2(center(), MINE_POS[i]) < dis2(center(), nextMinePos))
                    )
-                    nextMinePos = MINE_POS[i];
+                {
+                    int enemyCnt = 0;
+                    for (const auto &x : conductor.get_enemy_pos())
+                        if (dis2(conductor.get_p_unit(x.first)->pos, p) <= MINING_RANGE * 16)
+                            enemyCnt ++;
+                    mylog << "GroupAction : FGroup " << groupId << " : mine " << p << " : enemyCnt = " << enemyCnt << std::endl;
+                    if (enemyCnt <= member.size()*1.25)
+                        nextMinePos = p;
+                }
+            }
+        }
+        if (nextMinePos == Pos(-1, -1) && curMinePos == Pos(-1, -1))
+        {
+            for (int i=0; i<MINE_NUM; i++)
+            {
+                const Pos &p = MINE_POS[i];
+                if (
+                    ! conductor.mine_visible(p) &&
+                    ! conductor.is_mining(p) &&
+                    conductor.get_energy(p) > 0 && // the difference
+                    (nextMinePos == Pos(-1, -1) || dis2(center(), MINE_POS[i]) < dis2(center(), nextMinePos))
+                   )
+                {
+                    int enemyCnt = 0;
+                    for (const auto &x : conductor.get_enemy_pos())
+                        if (dis2(conductor.get_p_unit(x.first)->pos, p) <= MINING_RANGE * 16)
+                            enemyCnt ++;
+                    mylog << "GroupAction : FGroup " << groupId << " : mine " << p << " : enemyCnt = " << enemyCnt << std::endl;
+                    if (enemyCnt <= member.size()*1.25)
+                        nextMinePos = p;
+                }
+            }
         }
         if (nextMinePos != MINE_POS[0] && nextMinePos != Pos(-1, -1))
         {
@@ -1483,7 +1529,7 @@ bool FGroup::checkSplit()
             || // deleted the died
             console->getBuff("reviving", member.back()->get_entity())
             || // split out scouter
-            ! in_battle() && ! attackBase &&
+            ! in_battle() && ! attackBase && curMinePos == Pos(-1, -1) &&
             lowerCase(member.back()->get_entity()->name) == "scouter" &&
             member.back()->get_entity()->mp >= SET_OBSERVER_MP &&
             member.back()->get_entity()->findSkill("setobserver")->cd == 0
@@ -1870,7 +1916,7 @@ void Conductor::finish()
 
 void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path)
 {
-    // 将可见敌人以及记忆10回合的敌人位置周边225平方距离，但不在目标400平方距离内的，加入blocks
+    // 将可见敌人以及记忆x回合的敌人位置周边225平方距离，但不在目标400平方距离内的，加入blocks
     // 若找不到则fallback到原有pathfinder
     std::vector<Pos> newBlocks = blocks;
     for (const auto &unit : conductor.get_enemy_pos())
@@ -1888,7 +1934,7 @@ void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &
         findShortestPath(map, start, dest, blocks, _path);
 }
 
-} // namespace rdai
+} // namespace RD_NAMESPACE
 
 /********************************/
 /*     Main interface           */
@@ -1896,7 +1942,7 @@ void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &
 
 void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 {
-    using namespace rdai;
+    using namespace RD_NAMESPACE;
     
     auto startTime = std::chrono::system_clock::now();
     console = new Console(map, info, cmd);
@@ -1925,4 +1971,5 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
 #undef conductor
 #undef CACHE_BEGIN
 #undef CACHE_END
+#undef RD_NAMESPACE
 
