@@ -16,7 +16,8 @@
 #include "filter.h"
 #include "console.h"
 
-#define RD_NAMESPACE rdai_ver9
+#define RD_NAMESPACE rdai_ver10
+#define LOG_FILE_NAME "mylog_ver10.txt"
 
 namespace RD_NAMESPACE {
 
@@ -62,7 +63,7 @@ namespace RD_NAMESPACE {
 /********************************/
 
 #ifdef RD_LOG_FILE
-    std::ofstream mylog("mylog.txt");
+    std::ofstream mylog(LOG_FILE_NAME);
 #else
     class NullBuffer : public std::streambuf
     {
@@ -108,8 +109,8 @@ const double BUY_HERO_THRESHOLD = 0.1;
 
 const double HP_STRENGTH_FACTOR = 1.0;
 const double HP_RATE_STRENGTH_FACTOR = 2.0;
-const double MP_STRENGTH_FACTOR = 1.0;
-const double MP_RATE_STRENGTH_FACTOR = 0.2;
+const double MP_STRENGTH_FACTOR = 0.2;
+const double MP_RATE_STRENGTH_FACTOR = 0.1;
 const double ATK_STRENGTH_FACTOR = 1.0;
 const double DEF_STRENGTH_FACTOR = 0.7;
 const double SPEED_STRENGTH_FACTOR = 0.5;
@@ -119,11 +120,12 @@ const double OBSERVER_FACTOR_RATE = 0.1;
 const double HP_VALUE_FACTOR = 1.0;
 const double DEF_VALUE_FACTOR = 0.9;
 const double ATK_VALUE_FACTOR = 1.0;
-const double MP_VALUE_FACTOR = 1.0;
+const double MP_VALUE_FACTOR = 0.1;
+const double COVER_VALUE_FACTOR = 1.5;
 const double DIZZY_VALUE_RATE = 1.5;
 const double WAITREVIVE_VALUE_RATE = 5.0;
 const double WINORDIE_VALUE_RATE = 8.0;
-const double ISMINING_VALUE_RATE = 2.0;
+const double ISMINING_VALUE_RATE = 1.5;
 
 const double DANGER_FACTOR = 1.0;
 const double ABILITY_FACTOR = 1.0;
@@ -137,7 +139,7 @@ const double NEW_MINE_MEMBER_THRESHOLD = 3;
 const double CUR_MINE_MEMBER_THRESHOLD = 2;
 const double MINE_THRESHOLD = 0.2; // remember we have this
 const double MINE_DIS_FACTOR = 0.1;
-const int ENEMY_MINE_ENERGY_THRESHOLD = 35;
+const int ENEMY_MINE_ENERGY_THRESHOLD = 25;
 
 const int JOIN_DIS2_THRESHOLD = 225;
 const int ENEMY_JOIN_DIS2 = 169;
@@ -186,6 +188,8 @@ public:
 
     PUnit *get_entity();
     const PUnit *get_entity() const;
+    FUnit *get_unit();
+    const FUnit *get_unit() const;
 
     virtual void attack(const EGroup &target);
     virtual void move(const Pos &p);
@@ -322,6 +326,9 @@ public:
     EUnit(EUnit &&) = delete;
     EUnit &operator=(EUnit &&) = delete;
     
+    int cover_by_num() const;
+    bool ready_for(const FUnit *u) const;
+    
     double danger_factor() const { return strength_factor() * DANGER_FACTOR; }
     double value_factor() const;
 };
@@ -342,6 +349,8 @@ public:
     FUnit &operator=(const FUnit &) = delete;
     FUnit(FUnit &&) = delete;
     FUnit &operator=(FUnit &&) = delete;
+    
+    int cover_by_ready_num() const;
     
     double ability_factor() const { return strength_factor() * ABILITY_FACTOR; }
     double health_factor() const;
@@ -555,6 +564,16 @@ inline const PUnit *Character::get_entity() const
     return conductor.get_p_unit(id);
 }
 
+inline FUnit *Character::get_unit()
+{
+    return conductor.get_f_unit(id);
+}
+
+inline const FUnit *Character::get_unit() const
+{
+    return conductor.get_f_unit(id);
+}
+
 void Character::attack(const EGroup &target)
 {
     const EUnit *targetUnit(0);
@@ -580,22 +599,30 @@ void Character::attack(const EGroup &target)
         }
     if (targetUnit)
     {
-        mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
-        console->attack(targetUnit->get_entity(), get_entity());
+        if (get_entity()->findSkill("attack")->cd >= 2)
+        {
+            const Pos _p(get_unit()->get_belongs()->center());
+            mylog << "UnitAction : Unit " << id << " : move(switch) " << _p << std::endl;
+            console->move(_p, get_entity());
+        } else
+        {
+            mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
+            console->attack(targetUnit->get_entity(), get_entity());
+        }
     }
 }
 
 void Character::move(const Pos &p)
 {
-    if (conductor.get_f_unit(id)->health_factor() > GOBACK_HEALTH_THRESHOLD)
+    if (get_unit()->health_factor() > GOBACK_HEALTH_THRESHOLD)
     {
         /* 行进中攻击
          * 1 如果超前于队伍，队伍又被攻击，就攻击攻击队伍的敌人
          * 2 如果冷却完毕，自己射程内有人，却没发现自己在敌人的射程中
          */
-        Pos v1(get_entity()->pos - conductor.get_f_unit(id)->get_belongs()->center()),
-            v2(p - conductor.get_f_unit(id)->get_belongs()->center());
-        const EGroup *targetGroup = conductor.get_f_unit(id)->get_belongs()->in_battle();
+        Pos v1(get_entity()->pos - get_unit()->get_belongs()->center()),
+            v2(p - get_unit()->get_belongs()->center());
+        const EGroup *targetGroup = get_unit()->get_belongs()->in_battle();
         if (targetGroup && dis2(v1, Pos(0,0)) > get_entity()->view/8 && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) > cos(0.33 * pi))
         {
             mylog << "UnitAction : Unit " << id << " : attack in move (1) " << std::endl;
@@ -654,9 +681,9 @@ void Character::move(const Pos &p)
     filter.setHpFilter(1, 0x7fffffff);
     if (! console->enemyUnits(filter).empty())
     {
-        Pos v1(conductor.get_f_unit(id)->get_belongs()->center() - get_entity()->pos), v2(p - get_entity()->pos);
+        Pos v1(get_unit()->get_belongs()->center() - get_entity()->pos), v2(p - get_entity()->pos);
         if (dis2(v1, Pos(0,0)) > get_entity()->view/4 && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) < cos(0.66 * pi))
-            _p = conductor.get_f_unit(id)->get_belongs()->center();
+            _p = get_unit()->get_belongs()->center();
     }
     mylog << "UnitAction : Unit " << id << " : move " << _p << std::endl;
     console->move(_p, get_entity());
@@ -691,7 +718,7 @@ void HammerGuard::attack(const EGroup &target)
 
 void Master::attack(const EGroup &target)
 {
-    Pos center(conductor.get_f_unit(id)->get_belongs()->center());
+    Pos center(get_unit()->get_belongs()->center());
     if (dis2(get_entity()->pos, center) > CURE_RANGE/2)
         move(center);
     else
@@ -703,14 +730,14 @@ void Master::move(const Pos &p)
     Pos target(-1, -1);
     if (get_entity()->mp >= BLINK_MP && get_entity()->findSkill("blink")->cd == 0)
     {
-        if (conductor.get_f_unit(id)->get_belongs()->get_member().size() == 1)
+        if (get_unit()->get_belongs()->get_member().size() == 1)
             target = p;
         else
         {
-            Pos v1(get_entity()->pos - conductor.get_f_unit(id)->get_belongs()->center()),
-                v2(p - conductor.get_f_unit(id)->get_belongs()->center());
+            Pos v1(get_entity()->pos - get_unit()->get_belongs()->center()),
+                v2(p - get_unit()->get_belongs()->center());
             if (dis2(v1, Pos(0,0)) > 2 * BLINK_RANGE && (v1.x * v2.x + v1.y * v2.y) / (dis(v1,Pos(0,0)) * dis(v2,Pos(0,0))) < cos(0.66 * pi))
-                target = conductor.get_f_unit(id)->get_belongs()->center();
+                target = get_unit()->get_belongs()->center();
         }
     }
     if (target != Pos(-1, -1))
@@ -724,30 +751,20 @@ void Master::move(const Pos &p)
 
 void Berserker::attack(const EGroup &target)
 {
-    if (! console->getBuff("beattacked", get_entity()) && get_entity()->findSkill("sacrifice")->cd == 0)
+    if (! get_unit()->cover_by_ready_num() && get_entity()->findSkill("sacrifice")->cd == 0 && get_entity()->findSkill("attack")->cd <= 1)
     {
         const EUnit *targetUnit(0);
         double val(-INFINITY);
-        if (get_entity()->findSkill("attack")->cd == 0)
-            for (const EUnit *e : target.get_member())
-            {
-                if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
-                if (lowerCase(e->get_entity()->name) == "observer" || lowerCase(e->get_entity()->name) == "mine") continue;
-                if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
-                double _val = e->value_factor();
-                if (_val > val)
-                    val = _val, targetUnit = e;
-            }
-        if (! targetUnit)
-            for (const EUnit *e : target.get_member())
-            {
-                if (lowerCase(e->get_entity()->name) == "mine") continue;
-                if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
-                double _val = e->value_factor();
-                if (_val > val)
-                    val = _val, targetUnit = e;
-            }
-        if (targetUnit && dis2(targetUnit->get_entity()->pos, get_entity()->pos) <= get_entity()->range)
+        for (const EUnit *e : target.get_member())
+        {
+            if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
+            if (lowerCase(e->get_entity()->name) == "observer" || lowerCase(e->get_entity()->name) == "mine") continue;
+            if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
+            double _val = e->value_factor();
+            if (_val > val)
+                val = _val, targetUnit = e;
+        }
+        if (targetUnit)
         {
             mylog << "UnitAction : Unit " << id << " : sacrifice" << std::endl;
             console->useSkill("sacrifice", NULL, get_entity());
@@ -923,6 +940,62 @@ double Unit<CampGroup, CampUnit>::strength_factor() const
     CACHE_END(val * ava / tot);
 }
 
+int EUnit::cover_by_num() const
+{
+    CACHE_BEGIN(int);
+    int ret(0);
+    UnitFilter filter;
+    filter.setTypeFilter("master", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, MASTER_RANGE), "w");
+    ret += console->friendlyUnits(filter).size();
+    filter.setTypeFilter("berserker", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, BERSERKER_RANGE), "w");
+    ret += console->friendlyUnits(filter).size();
+    filter.setTypeFilter("scouter", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, SCOUTER_RANGE), "w");
+    ret += console->friendlyUnits(filter).size();
+    filter.setTypeFilter("hammerguard", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, HAMMERGUARD_RANGE), "w");
+    ret += console->friendlyUnits(filter).size();
+    CACHE_END(ret);
+}
+
+bool EUnit::ready_for(const FUnit *u) const
+{
+    int dizzy(get_entity()->findBuff("dizzy") ? get_entity()->findBuff("dizzy")->timeLeft : -1);
+    if (dizzy >= 1) return false;
+    int cd1(get_entity()->findSkill("attack")->cd);
+    int cd2(get_entity()->findSkill("hammerattack") ? get_entity()->findSkill("hammerattack")->cd : 100);
+    if (get_entity()->findSkill("attack")->maxCd == 1) cd1 = 1;
+    if (dizzy == 0 && cd1 == 0) cd1 = 1;
+    if (dizzy == 0 && cd2 == 0) cd2 = 1;
+    if (cd1 >= 2 && cd2 >= 2) return false;
+    if (cd1 == 1 || cd2 == 1) return true;
+    
+    const PArg *arg = (*(u->get_entity()))["lasthit"];
+    if (arg)
+    {
+        const auto &val = arg->val;
+        assert(id >= 0);
+        if (val.size() > id && val.at(id) >= console->round() - get_entity()->findSkill("attack")->maxCd)
+        {
+            mylog << "UnitStatus : EUnit : " << id << " attacked " << u->get_id() << " last cycle" << std::endl;
+            return true;
+        }
+    }
+    
+    UnitFilter filter;
+    filter.setHpFilter(1, 0x7fffffff);
+    filter.setAreaFilter(new Circle(get_entity()->pos, get_entity()->range), "a");
+    filter.setAvoidFilter("mine", "a");
+    if (console->friendlyUnits().size() <= 2)
+    {
+        mylog << "UnitStatus : EUnit : " << id << " has <=2 targets" << std::endl;
+        return true;
+    }
+    return false;
+}
+
 double EUnit::value_factor() const
 {
     CACHE_BEGIN(double);
@@ -945,6 +1018,7 @@ double EUnit::value_factor() const
         }
         danger += console->unitArg("atk","c") * ATK_VALUE_FACTOR;
         def += console->unitArg("def","c") * DEF_VALUE_FACTOR;
+        danger += cover_by_num() * COVER_VALUE_FACTOR;
     }
     if (console->getBuff("dizzy", get_entity())) danger *= DIZZY_VALUE_RATE;
     if (console->getBuff("waitrevive", get_entity())) danger *= WAITREVIVE_VALUE_RATE;
@@ -954,6 +1028,39 @@ double EUnit::value_factor() const
     console->selectUnit(0);
 
     CACHE_END(danger / inf_1(hp * def / 5000));
+}
+
+int FUnit::cover_by_ready_num() const
+{
+    CACHE_BEGIN(int);
+    int ret(0);
+    UnitFilter filter;
+    filter.setHpFilter(1, 0x7fffffff);
+    filter.setTypeFilter("master", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, MASTER_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+    filter.setTypeFilter("berserker", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, BERSERKER_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+    filter.setTypeFilter("scouter", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, SCOUTER_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+    filter.setTypeFilter("hammerguard", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, HAMMERGUARD_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+    filter.setTypeFilter("roshan", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, Roshan_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+    filter.setTypeFilter("dragon", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, Dragon_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+    CACHE_END(ret);
 }
 
 double FUnit::health_factor() const
