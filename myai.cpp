@@ -165,7 +165,7 @@ const int ENEMY_JOIN_DIS2 = 169;
 
 const double GOBACK_HEALTH_THRESHOLD = 0.2;
 
-const double GOBACK_SURROUND_THRESHOLD = 0.3;
+const double GOBACK_SURROUND_THRESHOLD = 0.2;
 const double SUPPORT_SURROUND_THRESHOLD = 1.2;
 
 const int SEARCH_RANGE2 = 1225;
