@@ -90,10 +90,29 @@ inline T sqr(T x)
     return x*x;
 }
 
+inline Pos &operator+=(Pos &A, const Pos &B)
+{
+    A.x += B.x, A.y += B.y;
+    return A;
+}
+
+inline Pos &operator-=(Pos &A, const Pos &B)
+{
+    A.x -= B.x, A.y -= B.y;
+    return A;
+}
+
+inline Pos &operator*=(Pos &A, double k)
+{
+    A.x *= k, A.y *= k;
+    return A;
+}
+
 inline Pos operator*(Pos A, double k)
 {
     return Pos(A.x*k, A.y*k);
 }
+
 inline Pos operator*(double k, Pos A)
 {
     return Pos(A.x*k, A.y*k);
@@ -111,7 +130,7 @@ const double HP_STRENGTH_FACTOR = 1.0;
 const double HP_RATE_STRENGTH_FACTOR = 2.0;
 const double MP_STRENGTH_FACTOR = 0.2;
 const double MP_RATE_STRENGTH_FACTOR = 0.1;
-const double ATK_STRENGTH_FACTOR = 1.0;
+const double ATK_STRENGTH_FACTOR = 1.5;
 const double DEF_STRENGTH_FACTOR = 0.7;
 const double SPEED_STRENGTH_FACTOR = 0.5;
 const double RANGE_STRENGTH_FACTOR = 0.9;
@@ -121,7 +140,7 @@ const double HP_VALUE_FACTOR = 1.0;
 const double DEF_VALUE_FACTOR = 0.9;
 const double ATK_VALUE_FACTOR = 1.0;
 const double MP_VALUE_FACTOR = 0.1;
-const double COVER_VALUE_FACTOR = 1.5;
+const double COVER_VALUE_FACTOR = 2.5;
 const double DIZZY_VALUE_RATE = 1.5;
 const double WAITREVIVE_VALUE_RATE = 5.0;
 const double WINORDIE_VALUE_RATE = 8.0;
@@ -154,7 +173,7 @@ const int ALARM_RANGE2 = 2209;
 
 const int ALARM_ROUND = 5;
 
-const int POS_MEM_ROUND = 25;
+const int POS_MEM_ROUND = 30;
 
 static Console *console = 0;
 
@@ -301,10 +320,15 @@ public:
 
     Pos center() const // don't cache this because join/split
     {
+        int num(0);
         Pos ret(0, 0);
         for (const CampUnit *u : member)
-            ret = ret + u->get_entity()->pos;
-        return Pos(ret.x / member.size(), ret.y / member.size());
+        {
+            int weight(lowerCase(u->get_entity()->name) == "master" ? 3 : 1);
+            ret += u->get_entity()->pos * weight;
+            num += weight;
+        }
+        return ret * (1.0 / num);
     }
 
     bool has_type(const std::string &s) const;
@@ -327,7 +351,8 @@ public:
     EUnit &operator=(EUnit &&) = delete;
     
     int cover_by_num() const;
-    bool ready_for(const FUnit *u) const;
+    bool ready_for(const FUnit *u, const char *skill, int range) const;
+    Pos predict_pos() const;
     
     double danger_factor() const { return strength_factor() * DANGER_FACTOR; }
     double value_factor() const;
@@ -339,6 +364,7 @@ class FUnit : public Unit<FGroup, FUnit> // Friend Unit
     
     int madeAction; // = round
 
+    bool escape_sacrifice();
     void attack(const EGroup &target);
     void move(const Pos &p);
     void mine(const EGroup &target);
@@ -544,6 +570,8 @@ public:
     
     void set_alarm() { alarm = console->round(); }
     bool alarmed() const { return ~alarm && console->round() - alarm <= ALARM_ROUND; }
+    
+    Pos reachable(const FUnit *from, const Pos &to) const;
 
     void init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd);
     void work();
@@ -578,16 +606,16 @@ void Character::attack(const EGroup &target)
 {
     const EUnit *targetUnit(0);
     double val(-INFINITY);
-    if (get_entity()->findSkill("attack")->cd == 0)
-        for (const EUnit *e : target.get_member())
-        {
-            if (dis2(get_entity()->pos, e->get_entity()->pos) > get_entity()->range) continue;
-            if (lowerCase(e->get_entity()->name) == "observer" || lowerCase(e->get_entity()->name) == "mine") continue;
-            if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
-            double _val = e->value_factor();
-            if (_val > val)
-                val = _val, targetUnit = e;
-        }
+    for (const EUnit *e : target.get_member())
+    {
+        int maxRange(sqr(sqrt(get_entity()->range) + get_entity()->findSkill("attack")->cd * sqrt(get_entity()->speed)));
+        if (dis2(get_entity()->pos, e->get_entity()->pos) > maxRange) continue;
+        if (lowerCase(e->get_entity()->name) == "observer" || lowerCase(e->get_entity()->name) == "mine") continue;
+        if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
+        double _val = e->value_factor();
+        if (_val > val)
+            val = _val, targetUnit = e;
+    }
     if (! targetUnit)
         for (const EUnit *e : target.get_member())
         {
@@ -606,8 +634,21 @@ void Character::attack(const EGroup &target)
             console->move(_p, get_entity());
         } else
         {
-            mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
-            console->attack(targetUnit->get_entity(), get_entity());
+            const Pos target(targetUnit->predict_pos());
+            double totRange(dis(get_entity()->pos, target) - sqrt(get_entity()->range) * 0.8);
+            Pos q(get_entity()->pos), _p(q + (target-q) * (totRange/dis(target,q)));
+            if (
+                dis2(targetUnit->get_entity()->pos, get_entity()->pos) > get_entity()->range &&
+                Circle(target, sqr(sqrt(get_entity()->range) * 0.8)).contain(conductor.reachable(get_unit(), _p))
+               )
+            {
+                mylog << "UnitAction : Unit " << id << " : move(predict) " << _p << std::endl;
+                console->move(_p, get_entity());
+            } else
+            {
+                mylog << "UnitAction : Unit " << id << " : attack unit " << targetUnit->get_id() << std::endl;
+                console->attack(targetUnit->get_entity(), get_entity());
+            }
         }
     }
 }
@@ -700,7 +741,7 @@ void HammerGuard::attack(const EGroup &target)
             if (lowerCase(e->get_entity()->name) == "mine") continue;
             if (lowerCase(e->get_entity()->name) == "militarybase") continue;
             if (lowerCase(e->get_entity()->name) == "observer") continue;
-            if (console->getBuff("dizzy", e->get_entity())) continue;
+            if (e->get_entity()->findBuff("dizzy") && e->get_entity()->findBuff("dizzy")->timeLeft > 0) continue;
             if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
             double _val = e->danger_factor();
             if (_val > val && dis2(get_entity()->pos, e->get_entity()->pos) <= HAMMERATTACK_RANGE)
@@ -718,9 +759,37 @@ void HammerGuard::attack(const EGroup &target)
 
 void Master::attack(const EGroup &target)
 {
-    Pos center(get_unit()->get_belongs()->center());
+    Pos center(get_unit()->get_belongs()->center()), away(0, 0);
+    bool near(false);
+    for (const EUnit *e : target.get_member())
+        if (
+            (lowerCase(e->get_entity()->name) == "hammerguard" || lowerCase(e->get_entity()->name) == "berserker") &&
+            dis2(get_entity()->pos, e->get_entity()->pos) <= e->get_entity()->range
+           )
+        {
+            away -= get_entity()->pos - get_entity()->pos;
+            near = true;
+        }
+    if (away == Pos(0, 0))
+        away = center - get_entity()->pos;
+    away *= sqrt(MASTER_SPEED) / dis(away, Pos(0, 0));
+    
     if (dis2(get_entity()->pos, center) > CURE_RANGE/2)
+    {
+        mylog << "UnitAction : Master " << id << " : cure team" << std::endl;
         move(center);
+    }
+    else if (near)
+    {
+        const Pos _p(get_entity()->pos + away);
+        if (conductor.reachable(get_unit(), _p) == _p)
+        {
+            mylog << "UnitAction : Master " << id << " : withdraw" << std::endl;
+            mylog << "UnitAction : Unit " << id << " : move " << _p << std::endl;
+            console->move(_p, get_entity()); // move directly
+        } else
+            Character::attack(target);
+    }
     else
         Character::attack(target);
 }
@@ -751,7 +820,12 @@ void Master::move(const Pos &p)
 
 void Berserker::attack(const EGroup &target)
 {
-    if (! get_unit()->cover_by_ready_num() && get_entity()->findSkill("sacrifice")->cd == 0 && get_entity()->findSkill("attack")->cd <= 1)
+    if (
+        get_entity()->hp - 1 > get_entity()->atk &&
+        ! get_unit()->cover_by_ready_num() &&
+        get_entity()->mp >= SACRIFICE_MP && get_entity()->findSkill("sacrifice")->cd == 0 &&
+        get_entity()->findSkill("attack")->cd <= 1
+       )
     {
         const EUnit *targetUnit(0);
         double val(-INFINITY);
@@ -960,17 +1034,13 @@ int EUnit::cover_by_num() const
     CACHE_END(ret);
 }
 
-bool EUnit::ready_for(const FUnit *u) const
+bool EUnit::ready_for(const FUnit *u, const char *skill, int range) const
 {
     int dizzy(get_entity()->findBuff("dizzy") ? get_entity()->findBuff("dizzy")->timeLeft : -1);
     if (dizzy >= 1) return false;
-    int cd1(get_entity()->findSkill("attack")->cd);
-    int cd2(get_entity()->findSkill("hammerattack") ? get_entity()->findSkill("hammerattack")->cd : 100);
-    if (get_entity()->findSkill("attack")->maxCd == 1) cd1 = 1;
-    if (dizzy == 0 && cd1 == 0) cd1 = 1;
-    if (dizzy == 0 && cd2 == 0) cd2 = 1;
-    if (cd1 >= 2 && cd2 >= 2) return false;
-    if (cd1 == 1 || cd2 == 1) return true;
+    int cd(get_entity()->findSkill(skill) ? get_entity()->findSkill(skill)->cd : 100);
+    if (dizzy == 0 && cd == 0) cd = 1;
+    if (cd > 0) return false;
     
     const PArg *arg = (*(u->get_entity()))["lasthit"];
     if (arg)
@@ -986,14 +1056,54 @@ bool EUnit::ready_for(const FUnit *u) const
     
     UnitFilter filter;
     filter.setHpFilter(1, 0x7fffffff);
-    filter.setAreaFilter(new Circle(get_entity()->pos, get_entity()->range), "a");
+    filter.setAreaFilter(new Circle(get_entity()->pos, range), "a");
     filter.setAvoidFilter("mine", "a");
-    if (console->friendlyUnits().size() <= 2)
+    if (console->friendlyUnits(filter).size() <= 2)
     {
         mylog << "UnitStatus : EUnit : " << id << " has <=2 targets" << std::endl;
         return true;
     }
     return false;
+}
+
+Pos EUnit::predict_pos() const
+{
+    CACHE_BEGIN(Pos);
+    if (get_entity()->findBuff("dizzy"))
+    {
+        mylog << "UnitStatus : EUnit : " << id << " cannot move" << std::endl;
+        CACHE_END(get_entity()->pos);
+    }
+    UnitFilter rangeFilter;
+    rangeFilter.setHpFilter(1, 0x7fffffff);
+    rangeFilter.setAvoidFilter("mine", "a");
+    rangeFilter.setAreaFilter(new Circle(get_entity()->pos, get_entity()->range), "a");
+    if (! console->friendlyUnits(rangeFilter).empty())
+    {
+        mylog << "UnitStatus : EUnit : " << id << " is likely to stand still" << std::endl;
+        CACHE_END(get_entity()->pos);
+    }
+    
+    UnitFilter viewFilter;
+    viewFilter.setHpFilter(1, 0x7fffffff);
+    viewFilter.setAvoidFilter("mine", "a");
+    for (const EUnit *e : belongs->get_member())
+        viewFilter.setAreaFilter(new Circle(e->get_entity()->pos, e->get_entity()->view), "a");
+    const auto &inSight = console->friendlyUnits(viewFilter);
+    if (! inSight.empty())
+    {
+        Pos target(0, 0);
+        double minDis(sqrt(get_entity()->speed));
+        for (const PUnit *u : inSight)
+            minDis = std::min(minDis, dis(get_entity()->pos, u->pos));
+        for (const PUnit *u : inSight)
+            target += (u->pos - get_entity()->pos) * (minDis / dis(get_entity()->pos, u->pos));
+        target = get_entity()->pos + target * (1.0 / inSight.size());
+        mylog << "UnitStatus : EUnit : " << id << " is likely to move to " << target << std::endl;
+        CACHE_END(target);
+    }
+    
+    CACHE_END(get_entity()->pos);
 }
 
 double EUnit::value_factor() const
@@ -1039,27 +1149,31 @@ int FUnit::cover_by_ready_num() const
     filter.setTypeFilter("master", "w");
     filter.setAreaFilter(new Circle(get_entity()->pos, MASTER_RANGE), "w");
     for (const auto e : console->enemyUnits(filter))
-        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "attack", e->range));
     filter.setTypeFilter("berserker", "w");
-    filter.setAreaFilter(new Circle(get_entity()->pos, BERSERKER_RANGE), "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, BERSERKER_RANGE), "w"); // not considering level
     for (const auto e : console->enemyUnits(filter))
-        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "attack", e->range));
     filter.setTypeFilter("scouter", "w");
     filter.setAreaFilter(new Circle(get_entity()->pos, SCOUTER_RANGE), "w");
     for (const auto e : console->enemyUnits(filter))
-        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "attack", e->range));
     filter.setTypeFilter("hammerguard", "w");
     filter.setAreaFilter(new Circle(get_entity()->pos, HAMMERGUARD_RANGE), "w");
     for (const auto e : console->enemyUnits(filter))
-        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "attack", e->range));
+    filter.setTypeFilter("hammerguard", "w");
+    filter.setAreaFilter(new Circle(get_entity()->pos, HAMMERATTACK_RANGE), "w");
+    for (const auto e : console->enemyUnits(filter))
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "hammerattack", HAMMERATTACK_RANGE));
     filter.setTypeFilter("roshan", "w");
     filter.setAreaFilter(new Circle(get_entity()->pos, Roshan_RANGE), "w");
     for (const auto e : console->enemyUnits(filter))
-        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "attack", e->range));
     filter.setTypeFilter("dragon", "w");
     filter.setAreaFilter(new Circle(get_entity()->pos, Dragon_RANGE), "w");
     for (const auto e : console->enemyUnits(filter))
-        ret += (conductor.get_e_unit(e->id)->ready_for(this));
+        ret += (conductor.get_e_unit(e->id)->ready_for(this, "attack", e->range));
     CACHE_END(ret);
 }
 
@@ -1102,8 +1216,31 @@ EUnit::EUnit(int _id)
 FUnit::FUnit(int _id)
     : Unit<FGroup, FUnit>(_id), madeAction(-1) {}
 
+bool FUnit::escape_sacrifice()
+{
+    UnitFilter filter;
+    filter.setHpFilter(1, 0x7fffffff);
+    filter.setTypeFilter("berserker", "a");
+    Pos away(0, 0);
+    for (const PUnit *u : console->enemyUnits(filter))
+        if (dis2(u->pos, get_entity()->pos) <= u->range && u->findBuff("winordie") && ! u->findBuff("dizzy"))
+            away -= u->pos - get_entity()->pos;
+    if (away == Pos(0, 0)) return false;
+    away = get_entity()->pos + away * (sqrt(get_entity()->speed) / dis(away, Pos(0, 0)));
+    const Pos _p = conductor.reachable(this, away);
+    for (const PUnit *u : console->enemyUnits(filter))
+        if (dis2(u->pos, _p) <= u->range && u->findBuff("winordie") && ! u->findBuff("dizzy"))
+            return false;
+    mylog << "UnitAction : Unit " << id << " : move(escape sacrifice) " << away << std::endl;
+    console->move(away, get_entity());
+    madeAction = console->round();
+    return true;
+}
+
 void FUnit::attack(const EGroup &target)
 {
+    if (escape_sacrifice()) return;
+    
     if (madeAction == console->round())
     {
         mylog << "WARNING : Unit " << id << " : multiple command" << std::endl;
@@ -1117,6 +1254,8 @@ void FUnit::attack(const EGroup &target)
 
 void FUnit::move(const Pos &p)
 {
+    if (escape_sacrifice()) return;
+    
     if (madeAction == console->round())
     {
         mylog << "WARNING : Unit " << id << " : multiple command" << std::endl;
@@ -1133,6 +1272,8 @@ void FUnit::move(const Pos &p)
 
 void FUnit::mine(const EGroup &target)
 {
+    if (escape_sacrifice()) return;
+    
     if (madeAction == console->round())
     {
         mylog << "WARNING : Unit " << id << " : multiple command" << std::endl;
@@ -1141,9 +1282,12 @@ void FUnit::mine(const EGroup &target)
     
     auto member = target.get_member();
     if (member.size() == 1 && lowerCase(member.front()->get_entity()->name) == "mine")
-        move(member.front()->get_entity()->pos);
-    else
-        attack(target);
+    {
+        console->changeShortestPathFunc(findSafePath);
+        character->move(member.front()->get_entity()->pos);
+        console->changeShortestPathFunc(findShortestPath);
+    } else
+        character->attack(target);
     
     madeAction = console->round();
 }
@@ -1961,6 +2105,22 @@ void Conductor::save_p_units()
         i->second = std::make_pair(new PUnit(*(i->second.first)), true);
 }
 
+Pos Conductor::reachable(const FUnit *from, const Pos &to) const
+{
+    std::vector<Pos> blocks, path;
+    for(int j = 0; j < info->units.size(); ++j)
+        if (info->units[j].id != from->get_id())
+            blocks.push_back(info->units[j].pos);
+    for(int k = 0; k < MINE_NUM; ++k)
+        for(int i = - MINE_VOLUME + 1; i < MINE_VOLUME; ++i)
+            for(int j = - MINE_VOLUME + 1; j < MINE_VOLUME; ++j)
+                blocks.push_back(Pos(MINE_POS[k].x+i, MINE_POS[k].y+j));
+    for(int k = 0; k < MILITARY_BASE_NUM; ++k)
+        blocks.push_back(MILITARY_BASE_POS[k]);
+    findShortestPath(*map, from->get_entity()->pos, to, blocks, path);
+    return path.back();
+}
+
 void Conductor::init(const PMap &_map, const PPlayerInfo &_info, PCommand &_cmd)
 {
     map = &_map, info = &_info, cmd = &_cmd;
@@ -2023,7 +2183,7 @@ void Conductor::finish()
 
 void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &blocks, std::vector<Pos> &_path)
 {
-    // 将可见敌人以及记忆x回合的敌人位置周边225平方距离，但不在目标400平方距离内的，加入blocks
+    // 将可见敌人以及记忆x回合的敌人位置周边225平方距离，但不在目标400平方距离内的，周边100，但不在200内的，加入blocks
     // 若找不到则fallback到原有pathfinder
     std::vector<Pos> newBlocks = blocks;
     for (const auto &unit : conductor.get_enemy_pos())
@@ -2033,8 +2193,8 @@ void findSafePath(const PMap &map, Pos start, Pos dest, const std::vector<Pos> &
                 {
                     Pos _p(unit.second + Pos(i, j));
                     if (_p.x < 0 || _p.y < 0 || _p.x >= MAP_SIZE || _p.y >= MAP_SIZE) continue;
-                    if (dis2(_p, dest) <= 400) continue;
-                    newBlocks.push_back(_p);
+                    if (dis2(_p, dest) > 400 || dis2(_p, dest) > 200 && dis2(_p, unit.second) <= 100)
+                        newBlocks.push_back(_p);
                 }
     findShortestPath(map, start, dest, newBlocks, _path);
     if (dis2(_path.back(), dest) >= 16)
@@ -2072,7 +2232,9 @@ void player_ai(const PMap &map, const PPlayerInfo &info, PCommand &cmd)
     console = 0;
     
     auto endTime = std::chrono::system_clock::now();
-    mylog << "TimeConsumed : " << std::chrono::duration<double>(endTime - startTime).count() << "s" << std::endl;
+    double duration = std::chrono::duration<double>(endTime - startTime).count();
+    assert(duration < 0.1);
+    mylog << "TimeConsumed : " << duration << "s" << std::endl;
 }
 
 #undef conductor
