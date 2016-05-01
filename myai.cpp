@@ -146,6 +146,7 @@ const double WAITREVIVE_VALUE_RATE = 5.0;
 const double WINORDIE_VALUE_RATE = 8.0;
 const double ISMINING_VALUE_RATE = 1.5;
 
+const double WINORDIE_DANGER_RATE = 8.0;
 const double DANGER_FACTOR = 1.0;
 const double ABILITY_FACTOR = 1.0;
 
@@ -354,7 +355,12 @@ public:
     bool ready_for(const FUnit *u, const char *skill, int range) const;
     Pos predict_pos() const;
     
-    double danger_factor() const { return strength_factor() * DANGER_FACTOR; }
+    double danger_factor() const
+    {
+        double ret = strength_factor() * DANGER_FACTOR;
+        if (get_entity()->findBuff("winordie")) ret *= WINORDIE_DANGER_RATE;
+        return ret;
+    }
     double value_factor() const;
 };
 
@@ -621,6 +627,7 @@ void Character::attack(const EGroup &target)
         {
             if (lowerCase(e->get_entity()->name) == "mine") continue;
             if (target.has_player() && (lowerCase(e->get_entity()->name) == "dragon" || lowerCase(e->get_entity()->name) == "roshan")) continue;
+            if (get_entity()->range < e->get_entity()->range && e->get_entity()->findBuff("winordie")) continue;
             double _val = e->value_factor();
             if (_val > val)
                 val = _val, targetUnit = e;
@@ -650,7 +657,8 @@ void Character::attack(const EGroup &target)
                 console->attack(targetUnit->get_entity(), get_entity());
             }
         }
-    }
+    } else
+        console->move(get_unit()->get_belongs()->center(), get_entity());
 }
 
 void Character::move(const Pos &p)
